@@ -152,6 +152,16 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
 
     huidig_regime = regimestatus["current_regime"] if regimestatus else "lp_mode"
 
+    # BUGFIX (3 sep 2026, gevonden na een verwarrende Telegram-melding):
+    # het label was voorheen een STATISCHE tekst per regime ("LP_MODE
+    # (actief in de pool)"), ongeacht of er daadwerkelijk een open
+    # positie was -- misleidend zodra LP_MODE actief is maar de positie
+    # (nog) niet geopend is (bv. na een mislukte heropening).
+    if huidig_regime == "lp_mode" and position_data is None:
+        regime_label = "LP_MODE (geen actieve positie -- wacht op herintrede)"
+    else:
+        regime_label = STRATEGIE_NAMEN.get(huidig_regime, huidig_regime)
+
     return {
         "hbar_price_usd": hbar_price_usd,
         "sauce_price_usd": sauce_price_usd,
@@ -161,7 +171,7 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
         "whbar_stuck": whbar_stuck,
         "position": position_data,
         "current_regime": huidig_regime,
-        "current_regime_label": STRATEGIE_NAMEN.get(huidig_regime, huidig_regime),
+        "current_regime_label": regime_label,
         "total_value_usd": total_value_usd,
     }
 
