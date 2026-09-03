@@ -3654,3 +3654,68 @@ een positie is) samen met de eerder vandaag gebouwde, periodieke
 vangnet-cooldown (probeert periodiek een nieuwe positie te openen als
 die er nog niet is) -- met de gebruiker te bevestigen of dit voldoende
 is, of dat er nog specifiekere logica gewenst is.
+
+## Toekomstig verzoek: handmatige forceer-knoppen op het dashboard
+
+Op verzoek, voor LATER (3 sep 2026, nog niet gebouwd): knoppen op het
+dashboard om regime-overgangen (LP_MODE <-> reflex) handmatig te
+forceren, voor als de gebruiker dit zelf nodig acht. VEREIST eerst dat
+het dashboard beveiligd wordt (nu nog geen login, bewust zo gekozen
+toen het alleen-lezen was -- schrijftoegang zonder beveiliging is een
+andere afweging). Gebruiker komt hier later op terug.
+
+## Drieledige strategie-herziening (3 sep 2026, op verzoek, uitgebreid ontwerpgesprek)
+
+Na de -5,90 HBAR-weigering (zie hierboven) volgde een dieper gesprek
+over hoe de bot met reflex-overstappen en buiten-bereik-situaties moet
+omgaan. Uitkomst, drie samenhangende wijzigingen:
+
+### 1. Buiten-bereik-genadeperiode (regime_orchestrator.py)
+Een positie die buiten haar range loopt, wordt niet meer METEEN
+herbalanceerd -- eerst een genadeperiode (default 30 min,
+OUT_OF_RANGE_GRACE_PERIOD_SECONDS) om te zien of de prijs vanzelf
+terugkeert. Nieuwe status: _out_of_range_detected_at, gereset zodra de
+prijs weer binnen bereik komt OF na een geslaagde herbalancering.
+
+### 2. Economische poort bij reflex-instappen VERWIJDERD
+Op expliciet verzoek: bij voldoende opstartkapitaal (~2000 euro) wegen
+transactiekosten niet op tegen het risico van gedeeltelijke
+blootstelling + impermanent loss tijdens een sterke, eenzijdige
+beweging. De bestaande drempel-overschrijding (REGIME_THRESHOLD) is nu
+zelf de enige poort -- die houdt via de gewogen, idiosyncratisch-
+bewuste sentiment-score al rekening met hoe belangrijk/marktbreed de
+LLM het nieuws vindt. evaluate_reflex_transition_economics() zelf
+blijft bestaan in gbm_range_model.py (niet verwijderd, voor eventuele
+heroverweging), alleen de aanroep in regime_orchestrator.py is weg.
+
+### 3. Markt-bevestigde terugkeer: bevestigingsperiode toegevoegd
+_check_market_confirmed_reflex_exit() HERBOUWD met een tweetraps-
+mechanisme: een RUWE trigger (1% terugval, OF 30 min zijwaarts --
+zijwaarts-duur verkort van 1 uur naar 30 min) moet nu nog eens
+reflex_exit_confirmation_seconds (default 30 min,
+REFLEX_EXIT_CONFIRMATION_SECONDS) ONONDERBROKEN blijven gelden vóórdat
+daadwerkelijk teruggekeerd wordt. Een tijdelijke terugval die binnen
+die periode weer herstelt, annuleert de bevestiging. Nieuwe status:
+_reflex_exit_pending_since, _reflex_exit_pending_reason (beide
+gereset bij het verlaten van reflex-modus EN bij elke nieuwe episode).
+
+Geeft in de praktijk: terugval-route ~30-31 min totaal (ruwe detectie
+is instant), zijwaarts-route ~60-65 min totaal (30 min detectie + 30
+min bevestiging).
+
+Geverifieerd, ALLE drie onderdelen functioneel getest via mocking:
+- Genadeperiode: geen actie <30 min, wel actie na 31 min (bevestigd)
+- Terugval-route: bevestigd na 31 min ononderbroken; EN correct
+  geannuleerd bij herstel binnen de bevestigingsperiode
+- Zijwaarts-route: correct pas na ~65 min (30+30) bevestigd, niet
+  eerder
+- Negatieve controle: een echte, doorlopende trend (>2 uur, +0,7% per
+  15 min) triggert nog steeds terecht nooit
+
+## Vaste heen-en-terug-kostenschatting empirisch herijkt (gbm_range_model.py)
+round_trip_cost_hbar: 6.0 -> 2,12 HBAR, gebaseerd op daadwerkelijk
+vandaag gemeten kosten: een echte open-transactie (gasUsed=761655,
+0,8607 HBAR) x2 (aanname: sluiten kost ongeveer evenveel) + gemiddelde
+swap-kosten (0,2008 HBAR, over 22 echte swaps) x2. Relevant al is de
+poort zelf nu verwijderd (zie boven) -- de functie en deze herijkte
+default blijven bestaan voor het geval de poort ooit terugkomt.
