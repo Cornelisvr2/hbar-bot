@@ -2292,8 +2292,19 @@ class RegimeOrchestrator:
                 market_confirmed_reason = reden
 
         if target_regime == self.current_regime:
+            # Toont fresh_reflex_price tijdens reflex-modus (3 sep 2026,
+            # ter verduidelijking na eerdere verwarring) -- dat is de
+            # prijs die de trailing-stop/markt-bevestigde-terugkeer-check
+            # hierboven DAADWERKELIJK gebruikten, niet noodzakelijk gelijk
+            # aan current_price (GeckoTerminal, kan een eigen, tragere
+            # verversings-cadans hebben voor deze testnet-pool).
+            weergave_prijs = (
+                fresh_reflex_price
+                if self.current_regime in (Regime.BULLISH_REFLEX, Regime.BEARISH_REFLEX)
+                else current_price
+            )
             print(f"[regime] Blijft in {self.current_regime.value} "
-                  f"(combined_score={combined_score:+.2f}, prijs={current_price:.5f})")
+                  f"(combined_score={combined_score:+.2f}, prijs={weergave_prijs:.5f})")
             return
 
         # Cooldown tegen flapping -- winst-name via de trailing-stop, en
