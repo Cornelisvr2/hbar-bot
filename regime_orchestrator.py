@@ -194,8 +194,18 @@ class RegimeOrchestrator:
         self.reflex_sideways_band_pct = float(
             os.environ.get("REFLEX_SIDEWAYS_BAND_PCT", "0.01")
         )
+        # HERZIEN (3 sep 2026, op verzoek): 30 minuten i.p.v. 1 uur.
         self.reflex_sideways_duration_seconds = float(
-            os.environ.get("REFLEX_SIDEWAYS_DURATION_SECONDS", str(60 * 60))
+            os.environ.get("REFLEX_SIDEWAYS_DURATION_SECONDS", str(30 * 60))
+        )
+        # NIEUW (3 sep 2026, op verzoek): bevestigingsperiode -- zodra EEN
+        # van beide ruwe condities (terugval of zijwaarts) actief wordt,
+        # moet die nog dit lang ONONDERBROKEN blijven gelden vóórdat
+        # daadwerkelijk teruggekeerd wordt naar LP_MODE.
+        self._reflex_exit_pending_since: Optional[float] = None
+        self._reflex_exit_pending_reason: str = ""
+        self.reflex_exit_confirmation_seconds = float(
+            os.environ.get("REFLEX_EXIT_CONFIRMATION_SECONDS", str(30 * 60))
         )
         # Actieve reflex-episode-id (27 aug 2026) -- None zolang we in
         # LP_MODE zitten, anders de id van de rij in reflex_episodes die
@@ -282,6 +292,16 @@ class RegimeOrchestrator:
             os.environ.get("LP_REBALANCE_COOLDOWN_SECONDS", str(15 * 60))
         )
         self._last_lp_rebalance_at = 0.0
+
+        # NIEUW (3 sep 2026, op verzoek): een positie die buiten zijn range
+        # loopt, wordt niet meer METEEN herbalanceerd -- eerst een
+        # genade-periode (default 30 minuten, AANNAME) om te zien of de
+        # prijs vanzelf terugkeert, wat een onnodige, kostbare
+        # herbalancering bespaart bij een kortstondige uitschieter.
+        self._out_of_range_detected_at: Optional[float] = None
+        self.out_of_range_grace_period_seconds = float(
+            os.environ.get("OUT_OF_RANGE_GRACE_PERIOD_SECONDS", str(30 * 60))
+        )
 
         # Fee-onderprestatie-tracking (2 sep 2026, op verzoek) --
         # onthoudt het laatst waargenomen fee-niveau en sinds wanneer
@@ -1043,7 +1063,23 @@ class RegimeOrchestrator:
             live_price = current_price  # val terug op de meegegeven prijs als ophalen faalt
 
         if not self.lp_manager.is_price_out_of_range(live_price):
+            self._out_of_range_detected_at = None  # prijs is (weer) binnen bereik -- reset
             return
+
+        # Genade-periode (3 sep 2026, op verzoek): pas herbalanceren nadat
+        # de positie al minstens out_of_range_grace_period_seconds
+        # ONONDERBROKEN buiten bereik is geweest -- een kortstondige
+        # uitschieter die vanzelf terugkeert, kost dan geen onnodige
+        # herbalancerings-transactie.
+        nu = time.time()
+        if self._out_of_range_detected_at is None:
+            self._out_of_range_detected_at = nu
+            print(f"[regime] LP-positie buiten range gelopen (prijs={live_price:.5f}) -- "
+                  f"genade-periode van {self.out_of_range_grace_period_seconds/60:.0f} min gestart, "
+                  f"nog geen actie.")
+            return
+        if (nu - self._out_of_range_detected_at) < self.out_of_range_grace_period_seconds:
+            return  # nog binnen de genade-periode, stil wachten
 
         current_price = live_price  # de rest van deze functie gebruikt nu consistent de live prijs
 
@@ -1204,6 +1240,7 @@ class RegimeOrchestrator:
                    if abs(combined_score_now) >= MODERATE_SENTIMENT_THRESHOLD else "")
             )
             self._last_lp_rebalance_at = time.time()
+            self._out_of_range_detected_at = None  # genade-periode-tracking resetten, klaar voor een volgende keer
         except Exception as e:
             telegram_notify.report_error(
                 "regime_loop: herbalanceren (heropenen)",
@@ -1786,34 +1823,45 @@ class RegimeOrchestrator:
 
     def _check_market_confirmed_reflex_exit(self, current_price: float) -> tuple:
         """
-        NIEUW (3 sep 2026, op verzoek): controleert of de MARKT zelf
-        (los van de sentiment-score) aangeeft dat een reflex-uitstap
-        voorbij is -- ofwel via een terugval vanaf de piek/dal sinds de
-        uitstap, ofwel via een periode van zijwaartse consolidatie.
-        Beide drempels samen met de gebruiker bepaald (3 sep 2026),
-        AANNAMES, geen empirisch geijkte waarden:
+        NIEUW (3 sep 2026, HERZIEN op verzoek met een bevestigingsstap):
+        controleert of de MARKT zelf (los van de sentiment-score)
+        aangeeft dat een reflex-uitstap voorbij is -- ofwel via een
+        terugval vanaf de piek/dal sinds de uitstap, ofwel via een
+        periode van zijwaartse consolidatie. Beide zijn RUWE triggers --
+        zodra er EEN actief wordt, moet die nog reflex_exit_
+        confirmation_seconds (default 30 min) ONONDERBROKEN blijven
+        gelden vóórdat daadwerkelijk teruggekeerd wordt. Voorkomt dat een
+        kortstondige terugval of toevallige stilstand direct tot actie
+        leidt.
+
+        Drempels (samen met de gebruiker bepaald, 3 sep 2026, AANNAMES,
+        geen empirisch geijkte waarden):
         - reflex_pullback_threshold_pct (default 1%): terugval vanaf het
-          extreem (piek bij bullish, dal bij bearish) sinds het instappen
-          in de huidige reflex-episode.
+          extreem (piek bij bullish, dal bij bearish) sinds de uitstap.
         - reflex_sideways_band_pct (default 1%) gedurende
-          reflex_sideways_duration_seconds (default 1 uur): de koers is
-          binnen deze bandbreedte gebleven -- gekozen ruim boven HBAR's
-          normale uurvolatiliteit (~0,6%, empirisch gemeten), zodat
-          gewone marktruis niet per ongeluk als "gestabiliseerd" wordt
-          aangezien, maar wel duidelijk smaller dan een daadwerkelijke,
-          doorlopende trend.
+          reflex_sideways_duration_seconds (default 30 min, HERZIEN van
+          1 uur): de koers is binnen deze bandbreedte gebleven -- ruim
+          boven HBAR's normale uurvolatiliteit (~0,6%, empirisch
+          gemeten), zodat gewone marktruis niet als "gestabiliseerd"
+          telt.
+        - reflex_exit_confirmation_seconds (default 30 min): hoe lang een
+          RUWE trigger ononderbroken moet blijven gelden vóór actie.
 
-        Reset alle interne tracking zodra we NIET in een reflex-regime
-        zitten (voorkomt dat data van een vorige episode doorlekt naar
-        een volgende).
+        Reset alle interne tracking (inclusief de bevestigingsperiode)
+        zodra we NIET in een reflex-regime zitten, EN annuleert een
+        lopende bevestiging zodra de onderliggende, ruwe conditie niet
+        meer geldt (bv. de koers herstelt weer boven de terugval-drempel
+        tijdens het wachten).
 
-        Geeft (bool, str) terug: of de voorwaarde gehaald is, en een
-        leesbare reden voor logging/Telegram.
+        Geeft (bool, str) terug: of de voorwaarde BEVESTIGD gehaald is
+        (dus mag NU teruggekeerd worden), en een leesbare reden.
         """
         if self.current_regime not in (Regime.BULLISH_REFLEX, Regime.BEARISH_REFLEX):
             self._reflex_extreme_price = None
             self._reflex_price_history = []
             self._reflex_entered_at = None
+            self._reflex_exit_pending_since = None
+            self._reflex_exit_pending_reason = ""
             return False, ""
 
         nu = time.time()
@@ -1832,30 +1880,59 @@ class RegimeOrchestrator:
             (t, p) for t, p in self._reflex_price_history if t >= afsnijpunt
         ]
 
+        # Ruwe (nog niet bevestigde) triggers bepalen -- terugval-route.
         if self.current_regime == Regime.BULLISH_REFLEX:
             terugval_pct = (self._reflex_extreme_price - current_price) / self._reflex_extreme_price
         else:
             terugval_pct = (current_price - self._reflex_extreme_price) / self._reflex_extreme_price
-        if terugval_pct >= self.reflex_pullback_threshold_pct:
-            return True, (
-                f"{terugval_pct*100:.1f}% teruggevallen vanaf het extreem "
-                f"({self._reflex_extreme_price:.5f}) sinds de uitstap"
-            )
+        ruwe_terugval = terugval_pct >= self.reflex_pullback_threshold_pct
+        terugval_reden = (
+            f"{terugval_pct*100:.1f}% teruggevallen vanaf het extreem "
+            f"({self._reflex_extreme_price:.5f}) sinds de uitstap"
+        )
 
-        # Zijwaarts-check: alleen relevant als we al minstens de volledige
-        # duur (default 1 uur) in reflex-modus zitten -- anders is de
-        # prijsgeschiedenis nog te kort om iets te zeggen.
+        # Ruwe (nog niet bevestigde) trigger -- zijwaarts-route. Alleen
+        # relevant als we al minstens de volledige duur in reflex-modus
+        # zitten, anders is de prijsgeschiedenis nog te kort.
+        ruwe_zijwaarts = False
+        zijwaarts_reden = ""
         if (nu - self._reflex_entered_at) >= self.reflex_sideways_duration_seconds:
             prijzen = [p for _, p in self._reflex_price_history]
             if prijzen:
                 bandbreedte_pct = (max(prijzen) - min(prijzen)) / min(prijzen)
                 if bandbreedte_pct <= self.reflex_sideways_band_pct:
-                    return True, (
-                        f"{self.reflex_sideways_duration_seconds/3600:.0f} uur zijwaarts gebleven "
+                    ruwe_zijwaarts = True
+                    zijwaarts_reden = (
+                        f"{self.reflex_sideways_duration_seconds/60:.0f} min zijwaarts gebleven "
                         f"(binnen {bandbreedte_pct*100:.2f}%)"
                     )
 
-        return False, ""
+        ruwe_trigger = ruwe_terugval or ruwe_zijwaarts
+        ruwe_reden = terugval_reden if ruwe_terugval else zijwaarts_reden
+
+        if not ruwe_trigger:
+            # Geen van beide condities is momenteel actief -- een eventueel
+            # lopende bevestigingsperiode annuleren (de markt is niet
+            # aanhoudend genoeg gekalmeerd/teruggevallen).
+            self._reflex_exit_pending_since = None
+            self._reflex_exit_pending_reason = ""
+            return False, ""
+
+        if self._reflex_exit_pending_since is None:
+            self._reflex_exit_pending_since = nu
+            self._reflex_exit_pending_reason = ruwe_reden
+            print(f"[regime] Ruwe markt-trigger gedetecteerd tijdens {self.current_regime.value}: "
+                  f"{ruwe_reden} -- bevestigingsperiode van "
+                  f"{self.reflex_exit_confirmation_seconds/60:.0f} min gestart.")
+            return False, ""
+
+        if (nu - self._reflex_exit_pending_since) < self.reflex_exit_confirmation_seconds:
+            return False, ""  # nog binnen de bevestigingsperiode
+
+        return True, (
+            f"{self._reflex_exit_pending_reason} "
+            f"(bevestigd na {self.reflex_exit_confirmation_seconds/60:.0f} min ononderbroken)"
+        )
 
     async def _cycle(self):
         self._balance_fetch_failed_this_cycle = False  # opnieuw resetten bij elke cyclus
@@ -2136,49 +2213,22 @@ class RegimeOrchestrator:
         is_market_confirmed_reentry = False
         market_confirmed_reason = ""
 
-        # Economische poort (28 aug 2026, op verzoek): alleen toegepast bij
-        # een NIEUWE overstap VANUIT LP_MODE naar een reflex-regime (niet
-        # bij het weer VERLATEN van een reflex-regime, en niet bij
-        # winst-name via de trailing-stop hieronder, die altijd moet
-        # kunnen doorgaan) -- weegt af of de volledige heen-en-terug-
-        # cyclus (sluiten+swappen, later weer openen+swappen)
-        # daadwerkelijk meerwaarde heeft t.o.v. gewoon in de pool blijven.
-        if (self.current_regime == Regime.LP_MODE
-                and target_regime in (Regime.BULLISH_REFLEX, Regime.BEARISH_REFLEX)):
-            capital_hbar = float(self.rpc_client.get_hbar_balance()) if self.rpc_client else 0.0
-            gate_volatility_sigma = compute_combined_volatility_sigma(
-                self._cached_btc_volatility_sigma, self._cached_hbar_volatility_sigma
-            )
-            gate_volatility_sigma = min(1.0, gate_volatility_sigma * self._volatility_calibration_factor)
-            economics = evaluate_reflex_transition_economics(
-                current_price=current_price,
-                sentiment_mu=combined_score,
-                volatility_sigma=gate_volatility_sigma,
-                historical_hourly_volatility=self._cached_hourly_volatility,
-                horizon_hours=24.0,  # aanname: verwachte duur in reflex-modus
-                capital_hbar=capital_hbar,
-            )
-            if not economics.should_proceed:
-                print(f"[regime] Overstap naar {target_regime.value} geweigerd -- economische "
-                      f"poort: netto {economics.net_benefit_hbar:.2f} HBAR (vermeden IL "
-                      f"{economics.expected_il_avoided_hbar:.2f} H min misgelopen fees "
-                      f"{economics.expected_fee_income_foregone_hbar:.2f} H weegt niet op tegen "
-                      f"de geschatte heen-en-terug-kosten van {economics.round_trip_cost_hbar:.2f} H). "
-                      f"Blijft in lp_mode.")
-
-                # Telegram-melding met throttle (28 aug 2026) -- max 1x per
-                # uur, zodat een langdurig aanhoudend, gematigd signaal niet
-                # elke cyclus (60s) een nieuw bericht stuurt.
-                if (time.time() - self._last_economic_gate_notification_at) > 3600:
-                    telegram_notify.send_telegram_message(
-                        f"Overstap naar {target_regime.value} economisch geweigerd "
-                        f"(combined_score={combined_score:+.2f}) -- geschatte netto "
-                        f"{economics.net_benefit_hbar:.2f} HBAR (kosten wegen niet op tegen "
-                        f"de verwachte meerwaarde). Blijft in lp_mode. "
-                        f"[Deze melding wordt max 1x/uur herhaald bij aanhoudend signaal.]"
-                    )
-                    self._last_economic_gate_notification_at = time.time()
-                return
+        # Economische poort VERWIJDERD (28 aug 2026 gebouwd, 3 sep 2026 op
+        # expliciet verzoek weer verwijderd): woog voorheen af of de
+        # volledige heen-en-terug-cyclus (sluiten+swappen, later weer
+        # openen+swappen) daadwerkelijk meerwaarde had t.o.v. gewoon in de
+        # pool blijven -- maar bleek in de praktijk zelfs een gematigd,
+        # geldig signaal (combined_score=0.59) te weigeren puur door een
+        # vaste kostenpost die bij voldoende kapitaal verwaarloosbaar is.
+        # De gebruiker geeft aan: bij voldoende opstartkapitaal wegen de
+        # transactiekosten niet op tegen het risico van gedeeltelijke
+        # blootstelling + impermanent loss tijdens een sterke, eenzijdige
+        # beweging -- de bestaande drempel-overschrijding (REGIME_THRESHOLD,
+        # die al rekening houdt met hoe belangrijk/marktbreed de LLM het
+        # nieuws vindt via de gewogen, idiosyncratisch-bewuste score) is nu
+        # zelf de enige, voldoende poort. evaluate_reflex_transition_economics()
+        # zelf blijft bestaan in gbm_range_model.py (niet verwijderd, voor
+        # het geval dit ooit heroverwogen wordt), alleen deze aanroep hier.
 
         if self.current_regime == Regime.BULLISH_REFLEX and self.trailing_tracker:
             stop_price = self.trailing_tracker.update(current_price)
@@ -2286,6 +2336,8 @@ class RegimeOrchestrator:
                 self._reflex_extreme_price = None
                 self._reflex_price_history = []
                 self._reflex_entered_at = None
+                self._reflex_exit_pending_since = None
+                self._reflex_exit_pending_reason = ""
 
             self.current_regime = target_regime
 
