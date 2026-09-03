@@ -102,7 +102,21 @@ class RssNewsClient:
                     continue
 
                 published_ts = self._parse_published(entry)
-                if published_ts < cutoff:
+                # AANVULLENDE FIX (3 sep 2026, na de ontdekking dat CoinDesk's
+                # feed GEEN apart, vers updated_parsed-veld biedt --
+                # published_parsed en updated_parsed bleken identiek):
+                # "Live updates"-artikelen behouden hun bevroren, oorspronkelijke
+                # tijdstempel terwijl de INHOUD gedurende de dag evolueert.
+                # Voor dit specifieke, herkenbare patroon hanteren we een
+                # ruimer tijdvenster (24u i.p.v. het normale max_age_hours,
+                # meestal 4u) -- AANNAME, geen empirisch geijkte waarde --
+                # zodat zo'n artikel niet voortijdig uit de boot valt puur
+                # omdat het "publicatietijdstip" verouderd oogt.
+                is_live_updates_artikel = title.lower().startswith("live updates")
+                effectieve_cutoff = (
+                    time.time() - 24 * 3600 if is_live_updates_artikel else cutoff
+                )
+                if published_ts < effectieve_cutoff:
                     continue
 
                 # BUGFIX (3 sep 2026, gevonden na een gemist, marktbewegend
