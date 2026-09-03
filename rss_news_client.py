@@ -105,7 +105,17 @@ class RssNewsClient:
                 if published_ts < cutoff:
                     continue
 
-                item_id = hashlib.sha256(link.encode()).hexdigest()[:16]
+                # BUGFIX (3 sep 2026, gevonden na een gemist, marktbewegend
+                # BTC-artikel): het ID was voorheen PUUR op de URL gebaseerd
+                # -- "Live updates"-artikelen (precies het type dat grote
+                # gebeurtenissen zoals een Fed-aankondiging dekt) behouden
+                # vaak dezelfde URL terwijl de kop gedurende de dag
+                # ingrijpend verandert. Zodra zo'n artikel EENMAAL is
+                # verwerkt (met een vroege, mildere kop), werd elke latere,
+                # drastisch bijgewerkte versie van DEZELFDE URL stilzwijgend
+                # genegeerd -- de kop wordt nu meegenomen in het ID, zodat
+                # een gewijzigde kop op dezelfde URL als NIEUW item geldt.
+                item_id = hashlib.sha256(f"{link}|{title}".encode()).hexdigest()[:16]
                 if item_id in seen_ids:
                     continue  # zelfde artikel via meerdere feeds
                 seen_ids.add(item_id)
