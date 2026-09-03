@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  database:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: hbar_bot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: hbar_bot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db_schema.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hbar_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  hbar-bot:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: always  # crasht de bot, dan start Docker hem direct opnieuw
+    volumes:
+      - ./logs:/app/logs
+      # Zonder deze koppeling zou calibration_examples.json alleen in de
+      # container zelf worden weggeschreven, en verdwijnen bij de
+      # volgende --build. Met deze koppeling blijft het bestand altijd
+      # op de VPS staan, en pikt zowel een herstart als een herbouw de
+      # laatste versie op.
+      - ./calibration_examples.json:/app/calibration_examples.json
+
+  dashboard:
+    build: .
+    env_file:
+      - .env
+    command: uvicorn dashboard_server:app --host 0.0.0.0 --port 8000
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: always
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - dashboard
+    restart: always
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

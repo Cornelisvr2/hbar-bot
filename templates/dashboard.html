@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<title>HBAR Bot — Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0F1418;
+    --surface: #171E24;
+    --surface-raised: #1C242B;
+    --border: #2A333A;
+    --text: #E8E4DC;
+    --text-muted: #8A9199;
+    --gain: #5FBFA0;
+    --loss: #C0685A;
+    --gain-dim: rgba(95, 191, 160, 0.12);
+    --loss-dim: rgba(192, 104, 90, 0.12);
+    --sans: 'IBM Plex Sans', system-ui, sans-serif;
+    --mono: 'IBM Plex Mono', 'SF Mono', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.5;
+    padding: 0 0 64px;
+  }
+
+  .wrap { max-width: 920px; margin: 0 auto; padding: 0 20px; }
+
+  /* --- Masthead --- */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 28px 0 24px;
+    margin-bottom: 32px;
+  }
+  .masthead-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 22px;
+  }
+  .bot-name {
+    font-size: 14px;
+    color: var(--text-muted);
+    letter-spacing: 0.01em;
+  }
+  .bot-name strong { color: var(--text); font-weight: 600; }
+  .strategy-badge {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--gain);
+    background: var(--gain-dim);
+    border: 1px solid rgba(95, 191, 160, 0.3);
+    border-radius: 3px;
+    padding: 3px 9px;
+  }
+
+  .price-ticker {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .ticker-label { font-size: 13px; color: var(--text-muted); }
+  .ticker-val { font-family: var(--mono); font-size: 14px; }
+  .ticker-val.secondary { color: var(--text-muted); }
+
+  .value-row {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 18px;
+    flex-wrap: wrap;
+  }
+  .value-block { display: flex; align-items: flex-end; gap: 18px; flex-wrap: wrap; }
+  .value-main {
+    font-family: var(--mono);
+    font-size: 46px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  .denom-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 6px;
+  }
+  .denom-toggle button {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    padding: 5px 12px;
+    cursor: pointer;
+    border-right: 1px solid var(--border);
+  }
+  .denom-toggle button:last-child { border-right: none; }
+  .denom-toggle button.active { background: var(--surface-raised); color: var(--text); }
+  .value-change {
+    font-family: var(--mono);
+    font-size: 16px;
+    padding-bottom: 8px;
+  }
+  .value-change.up { color: var(--gain); }
+  .value-change.down { color: var(--loss); }
+  .value-change .period { color: var(--text-muted); font-size: 13px; margin-left: 4px; }
+
+  /* --- Period toggle + chart --- */
+  .panel {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    padding: 22px;
+    margin-bottom: 20px;
+  }
+  .panel-title {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+  }
+  .panel-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  .panel-title-row .panel-title { margin-bottom: 0; }
+  .toggle-btn {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  .toggle-btn:hover { color: var(--text); border-color: var(--text-muted); }
+  .period-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 18px;
+  }
+  .period-toggle button {
+    font-family: var(--mono);
+    font-size: 13px;
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    padding: 6px 14px;
+    cursor: pointer;
+    border-right: 1px solid var(--border);
+  }
+  .period-toggle button:last-child { border-right: none; }
+  .period-toggle button.active { background: var(--surface-raised); color: var(--text); }
+  .chart-wrap { height: 220px; }
+
+  .projection-row {
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+  .projection-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .p-period { font-size: 12px; color: var(--text-muted); }
+  .p-val { font-family: var(--mono); font-size: 22px; }
+  .p-change { font-family: var(--mono); font-size: 13px; }
+  .p-change.up { color: var(--gain); }
+  .projection-note {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.6;
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+
+  /* --- Position / range panel --- */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+
+  .range-track {
+    position: relative;
+    height: 8px;
+    background: var(--surface-raised);
+    border-radius: 4px;
+    margin: 28px 0 10px;
+  }
+  .range-fill {
+    position: absolute;
+    top: 0; bottom: 0;
+    background: var(--gain-dim);
+    border-radius: 4px;
+    left: 0; right: 0;
+  }
+  .range-marker {
+    position: absolute;
+    top: -6px;
+    width: 2px;
+    height: 20px;
+    background: var(--gain);
+  }
+  .range-marker::after {
+    content: attr(data-label);
+    position: absolute;
+    top: -22px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--gain);
+    white-space: nowrap;
+  }
+  .range-labels {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .stat-line {
+    display: flex;
+    justify-content: space-between;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+  }
+  .stat-line:last-child { border-bottom: none; }
+  .stat-line .label { color: var(--text-muted); }
+  .stat-line .val { font-family: var(--mono); }
+  .status-ok { color: var(--gain); }
+
+  /* --- Ledger --- */
+  .ledger-row {
+    display: grid;
+    grid-template-columns: 90px 1fr auto auto;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .ledger-row:last-child { border-bottom: none; }
+  .ledger-date { font-family: var(--mono); color: var(--text-muted); font-size: 12px; }
+  .ledger-type { color: var(--text); }
+  .ledger-type .tag {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: 6px;
+  }
+  .ledger-amount { font-family: var(--mono); text-align: right; }
+  .ledger-amount.cost { color: var(--loss); }
+  .ledger-amount.income { color: var(--gain); }
+
+  .summary-strip {
+    display: flex;
+    gap: 24px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .summary-item { font-size: 13px; }
+  .summary-item .label { color: var(--text-muted); display: block; margin-bottom: 2px; }
+  .summary-item .val { font-family: var(--mono); font-size: 15px; }
+
+  footer {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-top: 32px;
+    font-family: var(--mono);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="masthead-top">
+      <div class="bot-name">Beheert positie <strong>{{ d.position.token_id if d.position else "geen" }}</strong> op {{ d.network }}</div>
+      <div class="strategy-badge">{{ d.current_regime.upper() }}</div>
+    </div>
+
+    <div class="price-ticker">
+      <span class="ticker-label">1 HBAR</span>
+      <span class="ticker-val">${{ "%.4f"|format(d.hbar_price_usd) }}</span>
+      <span class="ticker-val secondary">€{{ "%.4f"|format(d.hbar_price_eur) }}</span>
+    </div>
+
+    <div class="value-row">
+      <div class="value-block">
+        <div class="value-main" id="valueMain">${{ "%.2f"|format(d.total_value_usd) }}</div>
+        <div class="value-change {{ 'up' if d.change_24h_pct is not none and d.change_24h_pct >= 0 else 'down' }}">{% if d.change_24h_pct is not none %}{{ "%+.1f"|format(d.change_24h_pct) }}%{% else %}—{% endif %} <span class="period">24u</span></div>
+      </div>
+      <div class="denom-toggle" role="group" aria-label="Weergave-eenheid">
+        <button class="active" data-denom="usd">USD</button>
+        <button data-denom="hbar">HBAR</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="panel">
+    <div class="panel-title">HBAR-koers</div>
+    <div class="period-toggle">
+      <button class="active" data-dagen="1">24u</button>
+      <button data-dagen="7">7d</button>
+      <button data-dagen="30">30d</button>
+      <button data-dagen="365">1j</button>
+    </div>
+    <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Waardeverandering</div>
+    <div class="chart-wrap"><canvas id="valueChart"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Voorspelling — bij aanhoudende APR</div>
+    <div class="projection-row">
+      <div class="projection-item">
+        <span class="p-period">30 dagen</span>
+        <span class="p-val">${{ "%.2f"|format(d.projection_30d) }}</span>
+        <span class="p-change up">+{{ "%.1f"|format((d.projection_30d/d.total_value_usd - 1)*100) }}%</span>
+      </div>
+      <div class="projection-item">
+        <span class="p-period">90 dagen</span>
+        <span class="p-val">${{ "%.2f"|format(d.projection_90d) }}</span>
+        <span class="p-change up">+{{ "%.1f"|format((d.projection_90d/d.total_value_usd - 1)*100) }}%</span>
+      </div>
+      <div class="projection-item">
+        <span class="p-period">180 dagen</span>
+        <span class="p-val">${{ "%.2f"|format(d.projection_180d) }}</span>
+        <span class="p-change up">+{{ "%.1f"|format((d.projection_180d/d.total_value_usd - 1)*100) }}%</span>
+      </div>
+    </div>
+    <div class="projection-note">
+      Uitgaande van de huidige pool-APR ({{ "%.1f"|format(d.pool_apr_pct) }}%), dagelijks samengesteld,
+      zonder verdere stortingen. Geen garantie — de APR schommelt in de
+      praktijk met het handelsvolume, en zegt niets over koersrisico
+      (impermanent loss) op de onderliggende HBAR/SAUCE-posities.
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-title">Positie &amp; range</div>
+      <div class="range-track">
+        <div class="range-fill"></div>
+        <div class="range-marker" style="left: {{ d.position.in_range_pct if d.position else 50 }}%;" data-label="{{ "%.2f"|format(d.pool_price_sauce_per_hbar) }}"></div>
+      </div>
+      <div class="range-labels">
+        <span>{{ "%.4f"|format(d.position.price_lower) if d.position else "—" }}</span>
+        <span>{{ "%.4f"|format(d.position.price_upper) if d.position else "—" }}</span>
+      </div>
+      <div class="stat-line"><span class="label">Breedte</span><span class="val">{{ "%.1f"|format(d.position.width_pct) if d.position else "—" }}%</span></div>
+      <div class="stat-line"><span class="label">Prijs in range</span><span class="val">{{ "%.1f"|format(d.position.in_range_pct) if d.position else "—" }}%</span></div>
+      <div class="stat-line"><span class="label">Status</span><span class="val {{ 'status-ok' if d.position and d.position.range_status == 'gezond' else '' }}">{{ d.range_status_label }}</span></div>
+      <div class="stat-line"><span class="label">Live pool-APR</span><span class="val">{{ "%.1f"|format(d.pool_apr_pct) }}%</span></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Samenstelling</div>
+      <div class="stat-line"><span class="label">Wallet — HBAR</span><span class="val">{{ "%.4f"|format(d.wallet.hbar) }}</span></div>
+      <div class="stat-line"><span class="label">Wallet — SAUCE</span><span class="val">{{ "%.2f"|format(d.wallet.sauce) }}</span></div>
+      <div class="stat-line"><span class="label">Positie — HBAR</span><span class="val">{{ "%.4f"|format(d.position.hbar) if d.position else "—" }}</span></div>
+      <div class="stat-line"><span class="label">Positie — SAUCE</span><span class="val">{{ "%.2f"|format(d.position.sauce) if d.position else "—" }}</span></div>
+      <div class="stat-line"><span class="label">Opgebouwde fees</span><span class="val status-ok">${{ "%.2f"|format(d.position.fee_value_usd) if d.position else "0.00" }}</span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title-row">
+      <div class="panel-title">Transactiegeschiedenis</div>
+      <button class="toggle-btn" id="ledgerToggle" onclick="ledgerInklappen()">Toon details</button>
+    </div>
+
+    <div id="ledgerDetails" style="display: none;">
+      {% if d.transactions %}
+      {% for t in d.transactions %}
+      <div class="ledger-row">
+        <span class="ledger-date">{{ t.date_label }}</span>
+        <span class="ledger-type">{{ t.description }}<span class="tag">{{ t.tag }}</span></span>
+        {% if t.is_cost %}
+        <span class="ledger-amount cost">−{{ "%.4f"|format(t.amount) }} HBAR</span>
+        <span></span>
+        {% else %}
+        <span></span>
+        <span class="ledger-amount income">+{{ "%.4f"|format(t.amount) }} HBAR</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="ledger-row"><span class="ledger-type" style="color: var(--text-muted);">Nog geen transacties geregistreerd.</span></div>
+      {% endif %}
+    </div>
+
+    <div class="summary-strip" style="margin-top: 0; padding-top: 0; border-top: none;">
+      <div class="summary-item"><span class="label">Totale kosten (30d)</span><span class="val">{{ "%.4f"|format(d.total_costs_30d) }} HBAR</span></div>
+      <div class="summary-item"><span class="label">Totale fee-inkomsten (30d)</span><span class="val status-ok">{{ "%.4f"|format(d.total_income_30d) }} HBAR</span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Totaaloverzicht (sinds start)</div>
+    {% if d.total_deposits_hbar is not none %}
+    <div class="stat-line"><span class="label">Totaal bijgestort kapitaal</span><span class="val">{{ "%.4f"|format(d.total_deposits_hbar) }} HBAR</span></div>
+    <div class="stat-line"><span class="label">Netto resultaat</span><span class="val {{ 'status-ok' if d.net_result_usd is not none and d.net_result_usd >= 0 else '' }}" style="{{ 'color: var(--loss);' if d.net_result_usd is not none and d.net_result_usd < 0 else '' }}">{{ "%+.2f"|format(d.net_result_usd) }} USD</span></div>
+    {% else %}
+    <div class="stat-line"><span class="label">Totaaloverzicht</span><span class="val" style="color: var(--text-muted);">Niet beschikbaar (kon mirror node niet bereiken)</span></div>
+    {% endif %}
+  </div>
+
+  <footer>Bijgewerkt: {{ d.generated_at }}</footer>
+
+</div>
+
+<script>
+  // Valuta-toggle voor de hoofdwaarde (mockup: vaste voorbeeldwaarden;
+  // bij de live versie komen deze uit de daadwerkelijke wallet+positie-data).
+  const TOTAL_USD = {{ d.total_value_usd }};
+  const HBAR_PRICE_USD = {{ d.hbar_price_usd }};
+  const valueMainEl = document.getElementById('valueMain');
+  document.querySelectorAll('.denom-toggle button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.denom-toggle button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      if (btn.dataset.denom === 'usd') {
+        valueMainEl.textContent = '$' + TOTAL_USD.toFixed(2);
+      } else {
+        valueMainEl.textContent = (TOTAL_USD / HBAR_PRICE_USD).toFixed(2) + ' HBAR';
+      }
+    });
+  });
+
+  // Gedeelde grafiek-opmaak, hergebruikt voor zowel de prijs- als de
+  // waarde-grafiek (1 sep 2026).
+  function maakLijnGrafiek(canvasId, initieleData, kleur, achtergrondKleur, prefix, decimalen) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    return new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: initieleData.labels,
+        datasets: [{
+          data: initieleData.values,
+          borderColor: kleur,
+          backgroundColor: achtergrondKleur,
+          borderWidth: 1.5,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          pointHoverBackgroundColor: kleur,
+          fill: true,
+          tension: 0.15,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: {
+            grid: { display: false },
+            ticks: { color: '#8A9199', font: { family: 'IBM Plex Mono', size: 11 } }
+          },
+          y: {
+            grid: { color: '#2A333A' },
+            ticks: {
+              color: '#8A9199',
+              font: { family: 'IBM Plex Mono', size: 11 },
+              callback: (v) => prefix + v.toFixed(decimalen)
+            }
+          }
+        }
+      }
+    });
+  }
+
+  const priceChart = maakLijnGrafiek(
+    'priceChart', {{ d.price_chart_data_24h | tojson }},
+    '#8AB4F8', 'rgba(138, 180, 248, 0.08)', '$', 4
+  );
+  const valueChart = maakLijnGrafiek(
+    'valueChart', {{ d.chart_data_24h | tojson }},
+    '#5FBFA0', 'rgba(95, 191, 160, 0.08)', '$', 2
+  );
+
+  // Een enkele, gedeelde periode-toggle bestuurt BEIDE grafieken
+  // tegelijk (1 sep 2026) -- haalt bij elke klik de bijbehorende
+  // historie op voor zowel de prijs- als de waarde-grafiek.
+  document.querySelectorAll('.period-toggle button').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      document.querySelectorAll('.period-toggle button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const dagen = btn.dataset.dagen;
+      try {
+        const [prijsResp, waardeResp] = await Promise.all([
+          fetch(`/api/price-history?days=${dagen}`),
+          fetch(`/api/history?days=${dagen}`),
+        ]);
+        const prijsData = await prijsResp.json();
+        const waardeData = await waardeResp.json();
+        priceChart.data.labels = prijsData.labels;
+        priceChart.data.datasets[0].data = prijsData.values;
+        priceChart.update();
+        valueChart.data.labels = waardeData.labels;
+        valueChart.data.datasets[0].data = waardeData.values;
+        valueChart.update();
+      } catch (e) {
+        console.error('Kon historie niet ophalen:', e);
+      }
+    });
+  });
+
+  function ledgerInklappen() {
+    const details = document.getElementById('ledgerDetails');
+    const knop = document.getElementById('ledgerToggle');
+    const zichtbaar = details.style.display !== 'none';
+    details.style.display = zichtbaar ? 'none' : 'block';
+    knop.textContent = zichtbaar ? 'Toon details' : 'Verberg details';
+  }
+</script>
+</body>
+</html>

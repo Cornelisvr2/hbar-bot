@@ -1,0 +1,3 @@
+187-124-8-211.sslip.io {
+    reverse_proxy dashboard:8000
+}

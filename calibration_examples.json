@@ -1,0 +1,44 @@
+[
+  {
+    "headline": "Bitcoin ETF inflows hit $1.9B in strongest week since October 2025",
+    "asset": "BTC",
+    "sentiment_score": 0.65,
+    "return_pct": 3.374,
+    "horizon": "24h"
+  },
+  {
+    "headline": "Bernstein forecasts Bitcoin to reclaim $125K by late 2026 ahead of cycle peak",
+    "asset": "BTC",
+    "sentiment_score": 0.58,
+    "return_pct": 3.204,
+    "horizon": "24h"
+  },
+  {
+    "headline": "Bernstein forecasts Bitcoin to reclaim $125K by late 2026 ahead of cycle peak",
+    "asset": "BTC",
+    "sentiment_score": 0.58,
+    "return_pct": 3.103,
+    "horizon": "24h"
+  },
+  {
+    "headline": "Bernstein forecasts Bitcoin to reclaim $125K by late 2026 ahead of cycle peak",
+    "asset": "BTC",
+    "sentiment_score": 0.52,
+    "return_pct": 3.076,
+    "horizon": "24h"
+  },
+  {
+    "headline": "Bernstein forecasts Bitcoin to reclaim $125K by late 2026 ahead of cycle peak",
+    "asset": "BTC",
+    "sentiment_score": 0.52,
+    "return_pct": 2.655,
+    "horizon": "24h"
+  },
+  {
+    "headline": "Bitcoin takes a breather after adding 23% in 7 days as ETF demand holds steady",
+    "asset": "BTC",
+    "sentiment_score": 0.5,
+    "return_pct": 2.655,
+    "horizon": "24h"
+  }
+]
