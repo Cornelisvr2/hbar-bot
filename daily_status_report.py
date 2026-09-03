@@ -243,14 +243,23 @@ async def main():
     if whbar_stuck > 0.001:
         stuck_regel = f"\n⚠️ Vastzittende WHBAR: {whbar_stuck:.4f} (nog niet omgezet naar native HBAR)"
 
+    # BUGFIX (3 sep 2026, gevonden na een verwarrende Telegram-melding):
+    # het label was voorheen een STATISCHE tekst per regime, ongeacht of
+    # er daadwerkelijk een open positie was -- zelfde fix als in
+    # bot_data.py's fetch_dashboard_data(), hier apart nodig omdat dit
+    # bestand zijn eigen, losse strategie_namen-mapping heeft.
     strategie_namen = {
         "lp_mode": "LP_MODE (actief in de pool)",
         "bullish_reflex": "BULLISH_REFLEX (volledig uitgestapt, alles in HBAR)",
         "bearish_reflex": "BEARISH_REFLEX (volledig uitgestapt, alles in SAUCE)",
     }
     huidig_regime = regimestatus["current_regime"] if regimestatus else "lp_mode"
+    if huidig_regime == "lp_mode" and positie is None:
+        strategie_label = "LP_MODE (geen actieve positie -- wacht op herintrede)"
+    else:
+        strategie_label = strategie_namen.get(huidig_regime, huidig_regime)
     strategie_regel = (
-        f"\n\n🎯 *Huidige strategie*: {strategie_namen.get(huidig_regime, huidig_regime)}"
+        f"\n\n🎯 *Huidige strategie*: {strategie_label}"
         f"{range_regel}"
     )
 
