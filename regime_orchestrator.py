@@ -251,6 +251,21 @@ class RegimeOrchestrator:
         )
         self._last_lp_rebalance_at = 0.0
 
+        # Fee-onderprestatie-tracking (2 sep 2026, op verzoek) --
+        # onthoudt het laatst waargenomen fee-niveau en sinds wanneer
+        # dat niet meer gegroeid is, zodat een positie die dicht bij de
+        # rand staat EN structureel geen fees verdient (waarschijnlijk
+        # omdat het actuele handelsvolume elders in de pool plaatsvindt,
+        # buiten onze smalle band) proactief hercentreerd kan worden --
+        # los van de bestaande regime-drift-check, die alleen let op
+        # sentiment/volatiliteit-gebaseerde breedte-afwijkingen, niet op
+        # daadwerkelijke fee-prestatie.
+        self._last_significant_fee_hbar = 0.0
+        self._fee_stagnant_since = None
+        self.fee_stagnation_uren_drempel = float(
+            os.environ.get("FEE_STAGNATION_UREN_DREMPEL", "4.0")
+        )  # AANNAME, geen empirisch geijkte waarde
+
         # Automatisch bijstorten van overtollig wallet-kapitaal (30 aug
         # 2026, op verzoek) -- zodra er kapitaal bijgestort wordt (of
         # anderszins los in de wallet komt te staan) terwijl de bot in
@@ -649,11 +664,37 @@ class RegimeOrchestrator:
             f"Positie wordt geherbalanceerd."
         )
 
+        await self._sluit_en_heropen_positie(
+            fresh_price, current_price, nieuwe_tick_lower, nieuwe_tick_upper,
+            reden_label="regime_drift_check",
+        )
+
+    async def _sluit_en_heropen_positie(self, fresh_price: float, current_price: float,
+                                           nieuwe_tick_lower: int, nieuwe_tick_upper: int,
+                                           reden_label: str) -> bool:
+        """
+        Gedeelde sluit+balanceer+heropen-logica (2 sep 2026, geextraheerd
+        uit _regime_drift_check() bij het bouwen van de fee-
+        onderprestatie-check hieronder) -- voorkomt dat deze logica op
+        meerdere plekken los bestaat en apart onderhouden moet worden
+        (we hebben vandaag al meerdere keren gezien dat een bugfix op
+        de ene plek niet automatisch ook op een andere, vergelijkbare
+        plek terechtkwam).
+
+        reden_label wordt gebruikt in foutmeldingen, zodat duidelijk
+        blijft WELKE aanroeper (regime-drift, fee-onderprestatie, etc.)
+        de actie initieerde.
+
+        Geeft True terug bij een volledig geslaagde heropening, False
+        bij een (gedeeltelijke) mislukking -- de aanroeper hoeft zelf
+        geen verdere afhandeling te doen, deze functie stuurt zelf al
+        de juiste Telegram-meldingen.
+        """
         try:
             self.lp_manager.close_position(self.lp_manager.state.token_id)
         except Exception as e:
-            telegram_notify.report_error("regime_drift_check: positie sluiten", str(e))
-            return
+            telegram_notify.report_error(f"{reden_label}: positie sluiten", str(e))
+            return False
 
         await self.db.clear_active_lp_position()
 
@@ -661,7 +702,7 @@ class RegimeOrchestrator:
             fresh_price, nieuwe_tick_lower, nieuwe_tick_upper
         )
         if not balanceren_gelukt:
-            return
+            return False
 
         hbar_balance = self._get_swappable_hbar_balance(current_price)
         usdc_balance = self._get_swappable_usdc_balance()
@@ -682,10 +723,144 @@ class RegimeOrchestrator:
             )
             self._last_lp_rebalance_at = time.time()
             telegram_notify.send_telegram_message(
-                f"Regime-drift-herbalancering voltooid: nieuwe positie {self.lp_manager.state.token_id}."
+                f"{reden_label}: herbalancering voltooid, nieuwe positie {self.lp_manager.state.token_id}."
+            )
+            return True
+        except Exception as e:
+            telegram_notify.report_error(f"{reden_label}: nieuwe positie openen", str(e))
+            return False
+
+    async def _fee_underperformance_check(self, current_price: float):
+        """
+        NIEUW (2 sep 2026, op verzoek na een observatie tijdens live-
+        testen): een positie kan dicht bij de rand van zijn range staan
+        EN structureel geen fees verdienen -- waarschijnlijk omdat het
+        actuele handelsvolume elders in de pool plaatsvindt, buiten
+        onze smalle band, ook al is de POOL als geheel wel actief (zie
+        de live pool-APR). De bestaande _regime_drift_check() vangt dit
+        NIET op, want die let uitsluitend op sentiment/volatiliteit-
+        gebaseerde breedte-afwijkingen -- een positie die toevallig
+        naast het echte volume zit maar waarvan de GBM-voorgestelde
+        breedte niet noemenswaardig verschilt van de huidige, blijft zo
+        voor onbepaalde tijd vruchteloos staan.
+
+        Logica: als de positie dicht bij de rand staat (zelfde drempel
+        als de "dicht bij de rand"-statuslabel elders, <15% of >85%) EN
+        de opgebouwde fees al self.fee_stagnation_uren_drempel uur niet
+        meetbaar gegroeid zijn, wordt de positie proactief hercentreerd
+        op de HUIDIGE prijs (een verse GBM-berekening, dezelfde aanpak
+        als _regime_drift_check() -- geen aparte kosten-batenanalyse
+        hier: bij structureel nul fee-inkomsten is er per definitie
+        niets te verliezen aan fee-opbrengst door over te stappen, enkel
+        de kosten van de overstap zelf af te wegen tegen het feit dat de
+        positie anders voor onbepaalde tijd vruchteloos blijft staan).
+
+        Reset de stagnatie-tracking zodra de positie NIET meer dicht bij
+        de rand staat (dan is dit sowieso niet van toepassing) of zodra
+        de fees wél weer meetbaar groeien.
+        """
+        if not self.lp_manager or not self.lp_manager.state.is_open:
+            self._fee_stagnant_since = None
+            return
+
+        seconds_since_last_lp_rebalance = time.time() - self._last_lp_rebalance_at
+        if seconds_since_last_lp_rebalance < self.lp_rebalance_cooldown_seconds:
+            return
+
+        from lp_manager import tick_to_price
+        tick_lower = self.lp_manager.state.tick_lower
+        tick_upper = self.lp_manager.state.tick_upper
+        prijs_lower = tick_to_price(tick_lower, self._hbar_decimals, self._usdc_decimals)
+        prijs_upper = tick_to_price(tick_upper, self._hbar_decimals, self._usdc_decimals)
+        if prijs_upper <= prijs_lower:
+            return  # defensief, voorkomt een deling-door-nul verderop
+        in_range_pct = (current_price - prijs_lower) / (prijs_upper - prijs_lower) * 100
+
+        if 15 <= in_range_pct <= 85:
+            self._fee_stagnant_since = None  # niet dicht bij de rand -- niet van toepassing
+            return
+
+        # Actuele, opgebouwde fees opvragen (zelfde patroon als bot_data.py/
+        # dashboard, hier lokaal herhaald om geen kruis-afhankelijkheid
+        # tussen de bot en het dashboard te creeren).
+        try:
+            from bot_data import V2_POSITION_MANAGER_ABI
+            position_manager = self.rpc_client.w3.eth.contract(
+                address=self.lp_manager.config.position_manager_address,
+                abi=V2_POSITION_MANAGER_ABI,
+            )
+            UINT128_MAX = (2 ** 128) - 1
+            fee0_raw, fee1_raw = position_manager.functions.collect(
+                (self.lp_manager.state.token_id, self.rpc_client.address, UINT128_MAX, UINT128_MAX)
+            ).call({"from": self.rpc_client.address})
+            fee_hbar_nu = fee0_raw / (10 ** self._hbar_decimals)
+        except Exception as e:
+            telegram_notify.report_error(
+                "fee_underperformance_check: fees opvragen",
+                f"{e} -- overgeslagen, geen actie ondernomen.",
+            )
+            return
+
+        FEE_GROEI_DREMPEL_HBAR = 0.001  # AANNAME, ruwweg de gasfee-orde-grootte
+        if fee_hbar_nu > self._last_significant_fee_hbar + FEE_GROEI_DREMPEL_HBAR:
+            self._last_significant_fee_hbar = fee_hbar_nu
+            self._fee_stagnant_since = None  # fees groeien wel degelijk -- geen actie nodig
+            return
+
+        if self._fee_stagnant_since is None:
+            self._fee_stagnant_since = time.time()
+            return  # net pas beginnen te tellen, nog geen actie
+
+        uren_stagnant = (time.time() - self._fee_stagnant_since) / 3600
+        if uren_stagnant < self.fee_stagnation_uren_drempel:
+            return
+
+        print(f"[fee-onderprestatie] Positie staat {in_range_pct:.1f}% in de range (dicht bij de rand) "
+              f"en heeft {uren_stagnant:.1f} uur geen meetbare fee-groei laten zien -- "
+              f"positie wordt proactief hercentreerd.")
+
+        from safety_override import compute_fixed_combined_score, compute_combined_volatility_sigma
+        from gbm_range_model import apply_regime_bias
+        combined_score_now = compute_fixed_combined_score(self._cached_btc_score, self._cached_hbar_score)
+        combined_volatility_sigma_now = compute_combined_volatility_sigma(
+            self._cached_btc_volatility_sigma, self._cached_hbar_volatility_sigma
+        )
+        combined_volatility_sigma_now = min(
+            1.0, combined_volatility_sigma_now * self._volatility_calibration_factor
+        )
+        combined_score_now = apply_regime_bias(combined_score_now, self._cached_macro_regime)
+
+        try:
+            from lp_manager import get_live_pool_price
+            fresh_price = get_live_pool_price(
+                self.rpc_client, self.lp_manager.config.factory_address,
+                self.lp_manager.config.token0, self.lp_manager.config.token1,
+                self.lp_manager.config.fee_tier,
+                self._hbar_decimals, self._usdc_decimals,
             )
         except Exception as e:
-            telegram_notify.report_error("regime_drift_check: nieuwe positie openen", str(e))
+            telegram_notify.report_error("fee_underperformance_check: pool-prijs opvragen", str(e))
+            return
+
+        nieuwe_tick_lower, nieuwe_tick_upper = self.lp_manager.compute_range_via_gbm(
+            fresh_price, combined_score_now, combined_volatility_sigma_now,
+            self._cached_hourly_volatility,
+            macro_regime=self._cached_macro_regime,
+            confidence_level=self._determine_gbm_confidence_level(combined_score_now),
+        )
+
+        telegram_notify.send_telegram_message(
+            f"Positie staat {uren_stagnant:.1f} uur zonder meetbare fee-groei dicht bij de rand "
+            f"({in_range_pct:.1f}% in de range) -- wordt proactief hercentreerd op de huidige prijs."
+        )
+
+        gelukt = await self._sluit_en_heropen_positie(
+            fresh_price, current_price, nieuwe_tick_lower, nieuwe_tick_upper,
+            reden_label="fee_underperformance_check",
+        )
+        if gelukt:
+            self._fee_stagnant_since = None
+            self._last_significant_fee_hbar = 0.0
 
     async def _deploy_excess_capital_if_available(self, current_price: float):
         """
@@ -1653,6 +1828,7 @@ class RegimeOrchestrator:
         # binnen de (mogelijk te smalle) oude range zit. Zie de volledige
         # toelichting in de functie zelf.
         await self._regime_drift_check(current_price)
+        await self._fee_underperformance_check(current_price)
 
         # Automatisch overtollig kapitaal bijstorten (30 aug 2026, op
         # verzoek) -- WEER AANGEZET (30 aug 2026, zelfde dag) na een
