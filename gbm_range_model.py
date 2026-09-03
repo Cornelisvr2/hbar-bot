@@ -172,7 +172,7 @@ def evaluate_reflex_transition_economics(
     capital_hbar: float,
     typical_width: float = 0.15,
     fee_apr_at_typical_width: float = 0.0161,
-    round_trip_cost_hbar: float = 6.0,
+    round_trip_cost_hbar: float = 2.12,
 ) -> ReflexEconomicsResult:
     """
     Weegt af of een volledige reflex-overstap (LP-positie sluiten, alles
@@ -186,11 +186,20 @@ def evaluate_reflex_transition_economics(
     periode, tegen de geschatte kosten van de volledige heen-en-terug-
     cyclus (sluiten + swappen, en later weer openen + swappen).
 
-    round_trip_cost_hbar: standaard 6.0 HBAR -- ruwe schatting op basis
-        van vandaag empirisch gemeten kosten (~2 HBAR per close/open-
-        operatie, keer twee voor de volledige heen-en-terug-cyclus, plus
-        een marge voor de wrap/unwrap-stappen). AANNAME, geen exacte,
-        actuele meting.
+    round_trip_cost_hbar: HERIJKT (3 sep 2026, empirisch, na een
+        geconstateerde te-strenge weigering) op basis van daadwerkelijk
+        vandaag gemeten kosten: 2x positie-open/sluiten (~0,86 HBAR elk,
+        gasUsed=761655 bij een echte open-transactie, sluiten als
+        vergelijkbare aanname) + 2x swap (~0,20 HBAR elk, gemiddelde
+        over 22 recente, echte swaps) = ~2,12 HBAR. VOORHEEN 6,0 HBAR,
+        een ruwe schatting van 28 augustus zonder deze onderbouwing --
+        die bleek de poort structureel te streng te maken (een
+        gematigd, maar geldig signaal van combined_score=0.59 werd
+        geweigerd puur door deze te hoge vaste kostenpost, terwijl de
+        daadwerkelijke kosten van de heen-en-terug-cyclus veel lager
+        liggen). AANNAME blijft: sluiten kost ongeveer evenveel als
+        openen (geen aparte, empirische meting van een sluit-transactie
+        beschikbaar op het moment van deze herijking).
     typical_width/fee_apr_at_typical_width: gebruikt om de IL/fee-impact
         in te schatten alsof de bot met een gebruikelijke breedte in de
         pool zou zijn gebleven -- zelfde aanpak als elders vandaag
