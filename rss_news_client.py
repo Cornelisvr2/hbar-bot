@@ -130,8 +130,26 @@ class RssNewsClient:
 
     @staticmethod
     def _parse_published(entry) -> float:
-        # feedparser geeft published_parsed als time.struct_time terug
-        parsed_time = entry.get("published_parsed") or entry.get("updated_parsed")
+        # feedparser geeft published_parsed/updated_parsed als
+        # time.struct_time terug.
+        #
+        # BUGFIX (3 sep 2026, tweede, subtielere laag van dezelfde
+        # "live updates"-bug hierboven): updated_parsed wordt nu EERST
+        # geprobeerd, published_parsed als terugval -- niet andersom.
+        # Een doorlopend-bijgewerkt artikel (bv. "Live updates: Bitcoin
+        # jumps above $81,000...") behoudt zijn oorspronkelijke
+        # published_parsed-tijdstip terwijl de INHOUD gedurende de dag
+        # verandert -- daardoor kon zo'n artikel, ook na de ID-fix
+        # hierboven, alsnog buiten het max_age_hours-tijdvenster vallen
+        # en genegeerd worden, puur omdat het "publicatietijdstip"
+        # verouderd leek terwijl de inhoud actueel was. updated_parsed
+        # representeert (per RSS/Atom-specificatie) specifiek de laatste
+        # WIJZIGING van een item, en is dus de correctere maatstaf voor
+        # "hoe actueel is wat we nu zien" -- voor de meeste, niet-
+        # doorlopend-bijgewerkte artikelen (die geen updated_parsed
+        # hebben) verandert dit niets, die vallen gewoon terug op
+        # published_parsed zoals voorheen.
+        parsed_time = entry.get("updated_parsed") or entry.get("published_parsed")
         if parsed_time:
             return time.mktime(parsed_time)
         return time.time()  # fallback als de feed geen datum meegeeft
