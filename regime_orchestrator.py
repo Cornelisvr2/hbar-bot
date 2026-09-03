@@ -175,18 +175,50 @@ class RegimeOrchestrator:
         self.total_capital_usdc = float(os.environ.get("REGIME_TOTAL_CAPITAL_USDC", "2000"))
         self.current_regime = Regime.LP_MODE
         self.trailing_tracker: Optional[TrailingStopTracker] = None
+
+        # NIEUW (3 sep 2026, op verzoek): markt-bevestigde terugkeer naar
+        # LP_MODE tijdens een reflex-uitstap -- ANDERS dan de bestaande
+        # trailing-stop hierboven (die is specifiek voor winst-name bij
+        # BULLISH_REFLEX, 5% afstand) is dit een NIEUWE, aparte trigger die
+        # voor BEIDE reflex-richtingen werkt: keer terug naar de pool
+        # zodra de koers 1% is teruggevallen vanaf de piek/dal sinds de
+        # uitstap, OF 1 uur lang binnen een 1%-band is gebleven (beide
+        # AANNAMES, samen met de gebruiker bepaald, geen empirisch
+        # geijkte waarden). Reset bij elke nieuwe reflex-episode.
+        self._reflex_extreme_price: Optional[float] = None
+        self._reflex_price_history: list = []  # lijst van (timestamp, prijs)-tuples
+        self._reflex_entered_at: Optional[float] = None
+        self.reflex_pullback_threshold_pct = float(
+            os.environ.get("REFLEX_PULLBACK_THRESHOLD_PCT", "0.01")
+        )
+        self.reflex_sideways_band_pct = float(
+            os.environ.get("REFLEX_SIDEWAYS_BAND_PCT", "0.01")
+        )
+        self.reflex_sideways_duration_seconds = float(
+            os.environ.get("REFLEX_SIDEWAYS_DURATION_SECONDS", str(60 * 60))
+        )
         # Actieve reflex-episode-id (27 aug 2026) -- None zolang we in
         # LP_MODE zitten, anders de id van de rij in reflex_episodes die
         # bij het uitstappen wordt afgesloten met de uitstapprijs.
         self._active_reflex_episode_id: Optional[int] = None
-        # Voorkomt een ongecontroleerde herhaal-lus (26 aug 2026, empirisch
-        # gevonden: zonder dit deed het vangnet ELKE cyclus opnieuw een
-        # herbalancerings-swap zolang open_position() bleef falen, wat
-        # binnen enkele cycli honderden HBAR onnodig omzette). Het vangnet
-        # probeert nu MAXIMAAL EEN KEER per opstart -- bij falen is
-        # handmatige controle vereist (foutmelding gaat naar Telegram),
-        # geen automatische herhaling.
-        self._safetynet_attempted = False
+        # HERZIEN (3 sep 2026, op verzoek na een geconstateerd gat: een
+        # positie die om WELKE reden dan ook sluit -- regime-drift, fee-
+        # onderprestatie, of iets anders -- en waarvan de heropening
+        # mislukt, bleef daarna VOOR ONBEPAALDE TIJD leeg staan, omdat dit
+        # vangnet voorheen een simpele, eenmalige vlag was die alleen bij
+        # SPECIFIEK de flash-verdediging expliciet gereset werd). Nu een
+        # TIJD-GEBASEERDE cooldown i.p.v. een eenmalige vlag -- lost dit
+        # voor ELKE sluitings-oorzaak in één keer op, zonder dat elke
+        # nieuwe sluitings-plek zijn eigen, aparte reset nodig heeft.
+        # Cooldown bewust RUIM boven de oorspronkelijke zorg (26 aug 2026:
+        # zonder enige beperking deed het vangnet ELKE cyclus opnieuw een
+        # herbalancerings-SWAP zolang open_position() bleef falen, wat
+        # binnen enkele cycli honderden HBAR onnodig omzette) -- 30
+        # minuten, AANNAME, geen empirisch geijkte waarde.
+        self._last_safetynet_attempt_at = 0.0
+        self.safetynet_retry_cooldown_seconds = float(
+            os.environ.get("SAFETYNET_RETRY_COOLDOWN_SECONDS", str(30 * 60))
+        )
         # Dynamisch volatiliteitsregime (26 aug 2026) -- was voorheen altijd
         # de default NORMAL, nooit daadwerkelijk aan live prijsdata gekoppeld.
         self._cached_volatility_regime = VolatilityRegime.NORMAL
@@ -1349,7 +1381,7 @@ class RegimeOrchestrator:
             self.lp_manager.state.tick_lower = saved["tick_lower"]
             self.lp_manager.state.tick_upper = saved["tick_upper"]
             self.lp_manager.state.is_open = True
-            self._safetynet_attempted = True  # er is al een positie, vangnet hoeft niet te vuren
+            self._last_safetynet_attempt_at = time.time()  # er is al een positie, vangnet hoeft niet te vuren
             print(f"[regime] Bestaande LP-positie hersteld na herstart: "
                   f"token_id={saved['token_id']}, liquidity={actual_liquidity}")
         else:
@@ -1552,15 +1584,12 @@ class RegimeOrchestrator:
         try:
             self.lp_manager.close_position(token_id)
             await self.db.clear_active_lp_position()
-            # BUGFIX (28 aug 2026, gevonden bij nazoeken): zonder deze
-            # reset zou het vangnet NOOIT meer vuren na een flash-
-            # verdediging, omdat _safetynet_attempted al bij het opstarten
-            # (of bij een eerdere, normale vangnet-poging) op True is
-            # gezet en daarna nooit meer terugvalt op False. Kapitaal zou
-            # anders voor onbepaalde tijd los in de wallet blijven liggen
-            # nadat de verdedigingsperiode afloopt, tot een handmatige
-            # herstart.
-            self._safetynet_attempted = False
+            # Reset (28 aug 2026, gevonden bij nazoeken, nu structureel
+            # opgelost via de tijd-gebaseerde cooldown hierboven i.p.v.
+            # een aparte, handmatige reset per sluitings-oorzaak): het
+            # vangnet mag dit meteen weer proberen zodra de verdediging
+            # eindigt, niet pas na de volledige cooldown-periode.
+            self._last_safetynet_attempt_at = 0.0
             telegram_notify.send_telegram_message(
                 f"Flash-verdediging: LP-positie {token_id} succesvol gesloten."
             )
@@ -1575,7 +1604,7 @@ class RegimeOrchestrator:
             if still_open is False:
                 self.lp_manager.state.is_open = False
                 await self.db.clear_active_lp_position()
-                self._safetynet_attempted = False  # zelfde bugfix als hierboven
+                self._last_safetynet_attempt_at = 0.0  # zelfde bugfix als hierboven
 
                 recovered_msg = ""
                 try:
@@ -1755,6 +1784,79 @@ class RegimeOrchestrator:
                 return Regime.BEARISH_REFLEX
             return Regime.LP_MODE
 
+    def _check_market_confirmed_reflex_exit(self, current_price: float) -> tuple:
+        """
+        NIEUW (3 sep 2026, op verzoek): controleert of de MARKT zelf
+        (los van de sentiment-score) aangeeft dat een reflex-uitstap
+        voorbij is -- ofwel via een terugval vanaf de piek/dal sinds de
+        uitstap, ofwel via een periode van zijwaartse consolidatie.
+        Beide drempels samen met de gebruiker bepaald (3 sep 2026),
+        AANNAMES, geen empirisch geijkte waarden:
+        - reflex_pullback_threshold_pct (default 1%): terugval vanaf het
+          extreem (piek bij bullish, dal bij bearish) sinds het instappen
+          in de huidige reflex-episode.
+        - reflex_sideways_band_pct (default 1%) gedurende
+          reflex_sideways_duration_seconds (default 1 uur): de koers is
+          binnen deze bandbreedte gebleven -- gekozen ruim boven HBAR's
+          normale uurvolatiliteit (~0,6%, empirisch gemeten), zodat
+          gewone marktruis niet per ongeluk als "gestabiliseerd" wordt
+          aangezien, maar wel duidelijk smaller dan een daadwerkelijke,
+          doorlopende trend.
+
+        Reset alle interne tracking zodra we NIET in een reflex-regime
+        zitten (voorkomt dat data van een vorige episode doorlekt naar
+        een volgende).
+
+        Geeft (bool, str) terug: of de voorwaarde gehaald is, en een
+        leesbare reden voor logging/Telegram.
+        """
+        if self.current_regime not in (Regime.BULLISH_REFLEX, Regime.BEARISH_REFLEX):
+            self._reflex_extreme_price = None
+            self._reflex_price_history = []
+            self._reflex_entered_at = None
+            return False, ""
+
+        nu = time.time()
+        if self._reflex_entered_at is None:
+            self._reflex_entered_at = nu
+        if self._reflex_extreme_price is None:
+            self._reflex_extreme_price = current_price
+        elif self.current_regime == Regime.BULLISH_REFLEX:
+            self._reflex_extreme_price = max(self._reflex_extreme_price, current_price)
+        else:  # BEARISH_REFLEX
+            self._reflex_extreme_price = min(self._reflex_extreme_price, current_price)
+
+        self._reflex_price_history.append((nu, current_price))
+        afsnijpunt = nu - self.reflex_sideways_duration_seconds
+        self._reflex_price_history = [
+            (t, p) for t, p in self._reflex_price_history if t >= afsnijpunt
+        ]
+
+        if self.current_regime == Regime.BULLISH_REFLEX:
+            terugval_pct = (self._reflex_extreme_price - current_price) / self._reflex_extreme_price
+        else:
+            terugval_pct = (current_price - self._reflex_extreme_price) / self._reflex_extreme_price
+        if terugval_pct >= self.reflex_pullback_threshold_pct:
+            return True, (
+                f"{terugval_pct*100:.1f}% teruggevallen vanaf het extreem "
+                f"({self._reflex_extreme_price:.5f}) sinds de uitstap"
+            )
+
+        # Zijwaarts-check: alleen relevant als we al minstens de volledige
+        # duur (default 1 uur) in reflex-modus zitten -- anders is de
+        # prijsgeschiedenis nog te kort om iets te zeggen.
+        if (nu - self._reflex_entered_at) >= self.reflex_sideways_duration_seconds:
+            prijzen = [p for _, p in self._reflex_price_history]
+            if prijzen:
+                bandbreedte_pct = (max(prijzen) - min(prijzen)) / min(prijzen)
+                if bandbreedte_pct <= self.reflex_sideways_band_pct:
+                    return True, (
+                        f"{self.reflex_sideways_duration_seconds/3600:.0f} uur zijwaarts gebleven "
+                        f"(binnen {bandbreedte_pct*100:.2f}%)"
+                    )
+
+        return False, ""
+
     async def _cycle(self):
         self._balance_fetch_failed_this_cycle = False  # opnieuw resetten bij elke cyclus
         await self._refresh_sentiment_if_due()
@@ -1853,17 +1955,23 @@ class RegimeOrchestrator:
         # en is bovendien volledig herleidbaar als het zich voordoet.
         await self._deploy_excess_capital_if_available(current_price)
 
-        # VANGNET (26 aug 2026): current_regime start standaard op LP_MODE
-        # (zie __init__), maar dat betekent NIET automatisch dat er ook
-        # daadwerkelijk een LP-positie open staat -- open_position() wordt
-        # normaal alleen aangeroepen bij een gedetecteerde OVERGANG naar
-        # LP_MODE, wat bij het opstarten nooit gebeurt (er is geen vorig
-        # regime om vandaan te komen). Zonder dit vangnet blijft de bot
-        # voor altijd "in lp_mode hangen zonder LP" -- kapitaal staat dan
-        # nutteloos los in de wallet i.p.v. fees te verdienen.
+        # VANGNET (26 aug 2026, HERZIEN 3 sep 2026 naar een periodieke,
+        # tijd-gebaseerde cooldown i.p.v. een eenmalige vlag): current_regime
+        # start standaard op LP_MODE (zie __init__), maar dat betekent NIET
+        # automatisch dat er ook daadwerkelijk een LP-positie open staat --
+        # open_position() wordt normaal alleen aangeroepen bij een
+        # gedetecteerde OVERGANG naar LP_MODE, wat bij het opstarten nooit
+        # gebeurt (er is geen vorig regime om vandaan te komen) EN niet bij
+        # een positie die later, om welke reden dan ook, sluit zonder
+        # succesvolle heropening. Draait nu voortaan PERIODIEK (elke
+        # safetynet_retry_cooldown_seconds, standaard 30 minuten) zolang er
+        # geen actieve positie is -- kapitaal staat anders nutteloos los in
+        # de wallet i.p.v. fees te verdienen, voor onbepaalde tijd.
+        seconds_since_last_safetynet_attempt = time.time() - self._last_safetynet_attempt_at
         if (self.current_regime == Regime.LP_MODE and self.lp_manager
-                and not self.lp_manager.state.is_open and not self._safetynet_attempted):
-            self._safetynet_attempted = True  # ALTIJD zetten, ongeacht succes/falen -- voorkomt herhaling
+                and not self.lp_manager.state.is_open
+                and seconds_since_last_safetynet_attempt >= self.safetynet_retry_cooldown_seconds):
+            self._last_safetynet_attempt_at = time.time()  # ALTIJD zetten, ongeacht succes/falen -- voorkomt een cyclus-lus
             total_hbar_balance = self._get_swappable_hbar_balance(current_price)
 
             # Reserve = het GROOTSTE van de percentage-gebaseerde marge en de
@@ -2025,6 +2133,8 @@ class RegimeOrchestrator:
 
         target_regime = self._determine_target_regime(combined_score)
         is_profit_take = False
+        is_market_confirmed_reentry = False
+        market_confirmed_reason = ""
 
         # Economische poort (28 aug 2026, op verzoek): alleen toegepast bij
         # een NIEUWE overstap VANUIT LP_MODE naar een reflex-regime (niet
@@ -2078,15 +2188,41 @@ class RegimeOrchestrator:
                 target_regime = Regime.LP_MODE
                 is_profit_take = True
 
+        # NIEUW (3 sep 2026, op verzoek): markt-bevestigde terugkeer naar
+        # LP_MODE -- ANDERS dan de trailing-stop hierboven (specifiek
+        # voor winst-name bij BULLISH_REFLEX, 5% afstand), werkt dit voor
+        # BEIDE reflex-richtingen en is bedoeld om terug te keren zodra de
+        # markt daadwerkelijk lijkt te kalmeren, niet om winst te
+        # beschermen. Wordt alleen gecontroleerd als de sentiment-score
+        # ZELF nog geen terugkeer aangeeft (target_regime nog steeds de
+        # reflex-modus) -- dit is een AANVULLENDE, geen vervangende, weg
+        # terug naar de pool.
+        if (target_regime == self.current_regime
+                and self.current_regime in (Regime.BULLISH_REFLEX, Regime.BEARISH_REFLEX)):
+            markt_bevestigd, reden = self._check_market_confirmed_reflex_exit(current_price)
+            if markt_bevestigd:
+                print(f"[regime] Markt-bevestigde terugkeer naar LP_MODE tijdens "
+                      f"{self.current_regime.value}: {reden}.")
+                telegram_notify.send_telegram_message(
+                    f"Markt-bevestigde terugkeer naar LP_MODE: {reden}. "
+                    f"Positie wordt heropend."
+                )
+                target_regime = Regime.LP_MODE
+                is_market_confirmed_reentry = True
+                market_confirmed_reason = reden
+
         if target_regime == self.current_regime:
             print(f"[regime] Blijft in {self.current_regime.value} "
                   f"(combined_score={combined_score:+.2f}, prijs={current_price:.5f})")
             return
 
-        # Cooldown tegen flapping -- winst-name via de trailing-stop is
-        # hiervan uitgezonderd, die moet altijd direct kunnen.
+        # Cooldown tegen flapping -- winst-name via de trailing-stop, en
+        # een markt-bevestigde terugkeer (3 sep 2026, zelfde redenering:
+        # als de markt zelf al bevestigd heeft dat de beweging voorbij
+        # is, is verder wachten niet zinvol), zijn hiervan uitgezonderd.
         seconds_since_last = time.time() - self._last_transition_at
-        if not is_profit_take and seconds_since_last < self.regime_cooldown_seconds:
+        if (not is_profit_take and not is_market_confirmed_reentry
+                and seconds_since_last < self.regime_cooldown_seconds):
             remaining_min = (self.regime_cooldown_seconds - seconds_since_last) / 60
             print(f"[regime] Overgang naar {target_regime.value} uitgesteld -- "
                   f"cooldown actief, nog {remaining_min:.1f} min.")
@@ -2101,7 +2237,8 @@ class RegimeOrchestrator:
             hbar_score=self._cached_hbar_score,
             panic_override_triggered=(target_regime == Regime.BEARISH_REFLEX),
             reasoning=f"Regime-overgang {self.current_regime.value} -> {target_regime.value}"
-                      f"{' (winst-name)' if is_profit_take else ''}",
+                      f"{' (winst-name)' if is_profit_take else ''}"
+                      f"{f' (markt-bevestigd: {market_confirmed_reason})' if is_market_confirmed_reentry else ''}",
         )
 
         if DRY_RUN:
@@ -2126,7 +2263,12 @@ class RegimeOrchestrator:
             # -> bullish_reflex, zonder tussenstop in LP_MODE).
             if previous_regime in (Regime.BULLISH_REFLEX, Regime.BEARISH_REFLEX) \
                     and self._active_reflex_episode_id is not None:
-                exit_reason = "trailing_stop" if is_profit_take else "sentiment_reverted"
+                if is_profit_take:
+                    exit_reason = "trailing_stop"
+                elif is_market_confirmed_reentry:
+                    exit_reason = "market_confirmed"
+                else:
+                    exit_reason = "sentiment_reverted"
                 await self.db.log_reflex_exit(
                     self._active_reflex_episode_id, current_price, exit_reason
                 )
@@ -2136,6 +2278,14 @@ class RegimeOrchestrator:
                 self._active_reflex_episode_id = await self.db.log_reflex_entry(
                     target_regime.value, current_price, combined_score
                 )
+                # Markt-bevestigde-terugkeer-tracking resetten bij ELKE
+                # nieuwe reflex-episode (3 sep 2026) -- ook bij een
+                # directe wissel tussen bullish/bearish zonder tussenstop
+                # in LP_MODE, anders zou data van de vorige episode
+                # doorlekken naar de nieuwe.
+                self._reflex_extreme_price = None
+                self._reflex_price_history = []
+                self._reflex_entered_at = None
 
             self.current_regime = target_regime
 
@@ -2410,12 +2560,11 @@ class RegimeOrchestrator:
             # flash-verdedigingsperiode nog actief is, mag de bot NIET
             # meteen een nieuwe LP-positie openen middenin de volatiliteit
             # die de verdediging net probeerde te vermijden. Kapitaal
-            # blijft dan gewoon in HBAR/USDC staan; het vangnet (met de
-            # eerder herstelde _safetynet_attempted-reset) pakt het
-            # heropenen vanzelf weer op zodra de verdedigingsperiode
-            # afloopt.
+            # blijft dan gewoon in HBAR/USDC staan; het vangnet (nu een
+            # tijd-gebaseerde cooldown, zie __init__) pakt het heropenen
+            # vanzelf weer op zodra de verdedigingsperiode afloopt.
             if self._flash_defense_until > time.time():
-                self._safetynet_attempted = False
+                self._last_safetynet_attempt_at = 0.0
                 telegram_notify.send_telegram_message(
                     "Regime-schakelaar: overgang naar LP_MODE uitgesteld -- "
                     "flash-verdediging nog actief. Kapitaal blijft in HBAR/USDC "
