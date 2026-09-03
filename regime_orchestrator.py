@@ -2563,6 +2563,10 @@ class RegimeOrchestrator:
             return False
 
         all_succeeded = True
+        # Standaard False -- alleen de LP_MODE-tak hieronder (waar de
+        # balanceringsklem kan weigeren vóór enige transactie) zet dit
+        # ooit op True (3 sep 2026, zie toelichting daar).
+        geen_actie_ondernomen_door_klem = False
 
         if self.current_regime == Regime.LP_MODE and self.lp_manager and self.lp_manager.state.is_open:
             try:
@@ -2711,8 +2715,17 @@ class RegimeOrchestrator:
                 # zelfde reden als hierboven. all_succeeded baseert zich nu
                 # op de daadwerkelijke uitkomst i.p.v. hardcoded True.
                 all_succeeded = await self._ensure_balanced_liquidity_ratio(fresh_price, tick_lower, tick_upper)
+                # NIEUW (3 sep 2026, gevonden na een onterecht-alarmerende
+                # melding): onthoudt of de balanceringsklem HIER al weigerde
+                # -- als dat zo is, is er NOG NIETS naar de blockchain
+                # gestuurd, dus kapitaal is gegarandeerd nog exact waar het
+                # was. Dat verdient een rustige melding, geen "HANDMATIGE
+                # CONTROLE VEREIST"-alarm (dat is voor als een transactie
+                # WEL onderweg was en toen pas misging).
+                geen_actie_ondernomen_door_klem = not all_succeeded
             else:
                 all_succeeded = True
+                geen_actie_ondernomen_door_klem = False
 
             if all_succeeded and self.lp_manager:
                 # Balans NA de herbalancerings-swap opvragen, niet vooraf
@@ -2793,12 +2806,21 @@ class RegimeOrchestrator:
                     )
 
         if not all_succeeded:
-            telegram_notify.report_error(
-                "regime_loop",
-                f"Overgang naar {target_regime.value} DEELS OF VOLLEDIG MISLUKT -- "
-                f"regime blijft geregistreerd als {self.current_regime.value}, maar de "
-                f"werkelijke on-chain positie is mogelijk inconsistent. HANDMATIGE "
-                f"CONTROLE VEREIST voordat de bot hier verder op vertrouwt.",
-            )
+            if geen_actie_ondernomen_door_klem:
+                # Rustige, informatieve melding -- de balanceringsklem
+                # weigerde vóórdat er iets naar de blockchain ging, dus
+                # kapitaal is gegarandeerd nog exact waar het was.
+                print(f"[regime] Overgang naar {target_regime.value} nog niet mogelijk -- "
+                      f"balanceringsklem weigerde vóór enige transactie. Kapitaal onaangeroerd, "
+                      f"regime blijft {self.current_regime.value}. Wordt de eerstvolgende cyclus "
+                      f"opnieuw geprobeerd.")
+            else:
+                telegram_notify.report_error(
+                    "regime_loop",
+                    f"Overgang naar {target_regime.value} DEELS OF VOLLEDIG MISLUKT -- "
+                    f"regime blijft geregistreerd als {self.current_regime.value}, maar de "
+                    f"werkelijke on-chain positie is mogelijk inconsistent. HANDMATIGE "
+                    f"CONTROLE VEREIST voordat de bot hier verder op vertrouwt.",
+                )
 
         return all_succeeded
