@@ -4,7 +4,7 @@ import asyncio
 async def main():
     db = PostgresClient()
     await db.connect()
-    rows = await db.pool.fetch(
+    rows = await db._pool.fetch(
         "SELECT created_at, asset, headline, sentiment_score, volatility_sigma, confidence, is_idiosyncratic "
         "FROM sentiment_log "
         "WHERE created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 40"
