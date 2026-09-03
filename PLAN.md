@@ -3508,3 +3508,149 @@ Vanaf nu: `git pull`/`git add . && git commit && git push` rechtstreeks
 op de VPS, i.p.v. bestanden via de browser naar GitHub kopieren en dan
 met wget (+nocache-trucs, soms zelfs commit-hash-methode nodig) weer
 ophalen.
+
+## Kritieke bug gevonden: gemiste marktbewegende nieuwskoppen (3 sep 2026)
+
+Gevonden na een gerichte vraag ("waarom reageerde de bot niet op het
+Fed-nieuws van vandaag"): een genuine, gecoordineerde prijsbeweging in
+zowel BTC als HBAR vond plaats rond 14:00 UTC (BTC +2.17% in dat uur,
+HBAR volgde met +1.95%), maar de sentiment-log toont GEEN enkele
+analyse na 11:34 UTC -- een gat van 5.5+ uur, ondanks dat
+SENTIMENT_REFRESH_SECONDS=300 (5 minuten) elke cyclus zou moeten
+proberen te verversen.
+
+ROOT CAUSE: rss_news_client.py genereerde het item-ID PUUR op basis van
+de URL (hashlib.sha256(link.encode())). "Live updates"-artikelen
+(precies het type dat grote gebeurtenissen zoals een Fed-moment dekt)
+behouden vaak dezelfde URL terwijl de kop gedurende de dag ingrijpend
+verandert -- bevestigd via een live RSS-test: het artikel "Live
+updates: Bitcoin jumps above $81,000 as rates fall, dollar weaken"
+(10:42 UTC) stond WEL in de live feed, maar NIET in de sentiment-log,
+terwijl chronologisch omringende artikelen (10:29, 11:19, 11:26 UTC)
+wel verwerkt werden. Zodra zo'n artikel EENMAAL verwerkt is (met een
+vroege, mildere kop), werd elke latere, drastisch bijgewerkte versie
+van DEZELFDE URL stilzwijgend genegeerd door de
+i.id not in self._processed_news_ids-check -- precies wanneer het
+nieuws het belangrijkst wordt.
+
+OPGELOST: de kop wordt nu meegenomen in de ID-generatie
+(hashlib.sha256(f"{link}|{title}".encode())) -- een gewijzigde kop op
+dezelfde URL geldt voortaan als een nieuw, opnieuw te analyseren item.
+
+Apart, nog te onderzoeken: HBAR-feeds gaven bij een live test 0 items
+in 24 uur terug, terwijl BTC-feeds wel 9 items gaven -- kan een aparte,
+eigen oorzaak hebben (bv. een specifieke feed die niet meer werkt),
+wordt hieronder los onderzocht.
+
+## Tweede laag van de nieuws-bug opgelost: bevroren tijdstempel bij 'live updates' (3 sep 2026)
+
+Vervolg op de eerdere ID-fix: empirisch bevestigd dat CoinDesk's feed
+GEEN apart, vers updated_parsed-veld biedt voor doorlopend-bijgewerkte
+artikelen -- published_parsed en updated_parsed bleken bij het
+concrete "Live updates: Bitcoin jumps above $81,000..."-artikel
+IDENTIEK (beide 10:42:15 UTC, ook al evolueerde de inhoud daarna nog
+uren door). Een eerste, algemene fix (updated_parsed als eerste
+voorkeur i.p.v. published_parsed) is toegevoegd als correcte,
+toekomstbestendige verbetering voor feeds die dit WEL correct
+invullen, maar lost dit specifieke CoinDesk-gedrag niet op.
+
+AANVULLENDE, GERICHTE FIX: artikelen waarvan de titel begint met "live
+updates" (hoofdletterongevoelig) krijgen een ruimer tijdvenster (24u,
+AANNAME, niet empirisch geijkt) i.p.v. het normale max_age_hours
+(meestal 4u) -- voorkomt dat zulke artikelen voortijdig uit de boot
+vallen puur omdat hun bevroren tijdstempel verouderd oogt terwijl de
+inhoud actueel blijft.
+
+Geverifieerd: functioneel getest met een nagemaakte feed (2 items, elk
+7 uur "oud" volgens tijdstempel, binnen een normale 4u-drempel) --
+bevestigd dat het live-updates-item WEL gevonden wordt (ruimer
+venster), en het normale item TERECHT NIET (normale, strakke drempel
+correct gehandhaafd voor niet-live-updates-content).
+
+Samen met de eerdere ID-fix (kop meegenomen in de hash) lost dit de
+volledige, tweeledige oorzaak op van het gemiste, marktbewegende
+BTC-artikel van vandaag: (1) een bijgewerkte kop op dezelfde URL werd
+voorheen als "al verwerkt" overgeslagen, EN (2) zelfs als dat niet zo
+was geweest, zou het artikel op een gegeven moment alsnog buiten het
+tijdvenster zijn gevallen door het bevroren publicatietijdstip.
+
+## Acute gat opgelost: vangnet nu periodiek i.p.v. eenmalig (3 sep 2026)
+
+Bevestigd gevonden: de bot had GEEN enkel mechanisme dat een positie
+opnieuw probeerde te openen als die eenmaal gesloten was en de
+heropening mislukte -- alleen het opstart-vangnet probeerde het,
+EENMALIG, via een simpele boolean (_safetynet_attempted). Zonder
+handmatige herstart bleef kapitaal daardoor voor onbepaalde tijd los
+in de wallet staan, zoals we vandaag zelf ervoeren (~$187 kapitaal,
+urenlang inactief). Dit patroon was AL EERDER (28 aug 2026) ad-hoc
+opgelost voor specifiek de flash-verdediging (een aparte reset op die
+ene plek), maar niet voor andere sluitings-oorzaken zoals de nieuwe
+fee-onderprestatie-check.
+
+OPGELOST, STRUCTUREEL: _safetynet_attempted (boolean) vervangen door
+_last_safetynet_attempt_at (timestamp) + safetynet_retry_cooldown_seconds
+(env var SAFETYNET_RETRY_COOLDOWN_SECONDS, default 30 minuten --
+AANNAME, bewust ruim boven de oorspronkelijke zorg van 26 aug 2026: 
+zonder enige beperking deed het vangnet ELKE cyclus opnieuw een
+herbalancerings-SWAP zolang open_position() bleef falen, wat binnen
+enkele cycli honderden HBAR onnodig omzette). Dit lost het probleem nu
+voor ELKE sluitings-oorzaak in een keer op -- geen aparte, handmatige
+reset meer nodig bij elke nieuwe plek die een positie kan sluiten. Alle
+zes bestaande verwijzingen naar de oude vlag (init, opstart-herstel,
+twee flash-verdediging-resets, hoofd-gate, regime-overgang-uitstel)
+consistent omgezet.
+
+Geverifieerd: syntax, EN drie functionele scenario's (net geprobeerd ->
+geen actie; 31 min geleden -> mag opnieuw; nooit geprobeerd -> mag
+direct). NOG NIET live getest tegen een daadwerkelijk leeg-staande
+positie (de huidige, live situatie na deployment is hier de eerste
+echte test van).
+
+## Markt-bevestigde terugkeer naar LP_MODE (3 sep 2026, op verzoek)
+
+Op verzoek: bij een reflex-uitstap (bullish/bearish) moet de bot niet
+uitsluitend wachten tot de SENTIMENT-score terugkeert onder de
+drempel, maar ook kijken naar wat de MARKT zelf doet -- specifiek
+bedoeld voor situaties zoals vandaag, waar een sterke, sentiment-
+gedreven beweging (die de bot door de nieuws-bug miste) had moeten
+leiden tot een reflex-uitstap.
+
+Twee, samen met de gebruiker bepaalde condities (beide AANNAMES, geen
+empirisch geijkte waarden, elk apart instelbaar via env vars):
+- 1% terugval vanaf het extreem (piek bij bullish, dal bij bearish)
+  sinds het instappen in de huidige reflex-episode
+  (REFLEX_PULLBACK_THRESHOLD_PCT, default 0.01)
+- OF 1 uur binnen een 1%-band gebleven (REFLEX_SIDEWAYS_BAND_PCT,
+  default 0.01, REFLEX_SIDEWAYS_DURATION_SECONDS, default 3600) --
+  bewust ruim boven HBAR's normale, gemeten uurvolatiliteit (~0,6%)
+  om gewone marktruis niet als "gestabiliseerd" te laten tellen, maar
+  duidelijk smaller dan een daadwerkelijke, doorlopende trend
+  (empirisch getest tegen de daadwerkelijke bewegingsstappen van
+  vandaag: triggert terecht NOOIT tijdens zo'n trend).
+
+NIEUWE, APARTE methode (_check_market_confirmed_reflex_exit) --
+BEWUST NIET de bestaande trailing-stop (5%-afstand, alleen bullish,
+specifiek voor winst-name) aangepast, om dat al-geteste gedrag niet te
+verstoren. Werkt symmetrisch voor BEIDE reflex-richtingen. Alleen
+gecontroleerd als de sentiment-score ZELF nog geen terugkeer aangeeft
+-- een AANVULLENDE, geen vervangende weg terug naar de pool. Cooldown-
+uitzondering (net als winst-name): een markt-bevestigde terugkeer mag
+altijd direct, ongeacht de reguliere regime-cooldown. Tracking wordt
+gereset bij ELKE nieuwe reflex-episode, ook bij een directe wissel
+tussen bullish/bearish zonder tussenstop in LP_MODE.
+
+Geverifieerd: syntax, EN vijf functionele scenario's (reset buiten
+reflex; piek-tracking; terugval-trigger bullish; symmetrische bearish-
+bounce-trigger; zijwaarts-trigger na exact 1 uur, niet eerder; EN een
+negatieve controle die bevestigt dat een echte, doorlopende trend --
+met de daadwerkelijke stapgroottes van vandaag -- terecht nooit
+triggert).
+
+Nog open: onderdeel 1 van het oorspronkelijke verzoek (bij een
+bijstorting expliciet overwegen: aanvullen vs. wachten op een nieuwe
+positie) -- mogelijk al voldoende gedekt door de bestaande
+_deploy_excess_capital_if_available() (vult automatisch aan als er al
+een positie is) samen met de eerder vandaag gebouwde, periodieke
+vangnet-cooldown (probeert periodiek een nieuwe positie te openen als
+die er nog niet is) -- met de gebruiker te bevestigen of dit voldoende
+is, of dat er nog specifiekere logica gewenst is.
