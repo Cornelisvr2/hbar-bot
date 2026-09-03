@@ -2024,3 +2024,1487 @@ reflex-modus.
 
 VOLLEDIG LIVE GEKOPPELD (niet losstaand) -- dit beinvloedt DIRECT
 wanneer de bot daadwerkelijk overstapt naar bullish_reflex/bearish_reflex.
+
+## Volatiliteit-kalibratie gekoppeld aan de nachtelijke herkalibratie (28 aug 2026)
+
+Op verzoek: de bestaande "koers-vs-nieuws"-tracking (recalibrate_from_
+live_history.py, al bestaand van vóór vandaag, voor de few-shot-sentiment-
+voorbeelden) bleek NIET ook volatility_sigma bij te houden, en voedde de
+nieuwe self_calibration_model.py nog niet.
+
+- fetch_live_sentiment_history(): query uitgebreid met volatility_sigma.
+- build_volatility_calibration_datapoints() (nieuw): bouwt (voorspelde_
+  sigma, gerealiseerde_sigma)-paren. BELANGRIJKE KANTTEKENING: gebruikt
+  per-HEADLINE-scores als praktische proxy voor de geaggregeerde
+  voorspelling die de bot destijds daadwerkelijk gebruikte (geen exacte
+  reconstructie). Gerealiseerde volatiliteit genormaliseerd naar dezelfde
+  0.0-1.0-schaal (aanname: 2%/uur ~ sigma=1.0). Functioneel getest met
+  synthetische data (hoge voorspelling + vlakke koers -> correct lage
+  gerealiseerde sigma).
+- main(): berekent de kalibratiefactor via compute_calibration_factor(),
+  persisteert naar volatility_calibration.json (zelfde patroon als
+  calibration_examples.json -- vereist een herstart om te laden, geen
+  live-herlaad-mechanisme). Stuurt een Telegram-melding bij een
+  betekenisvolle wijziging (>0.01).
+- regime_orchestrator.py: laadt deze factor bij het opstarten
+  (_load_volatility_calibration_factor(), default 1.0 als het bestand nog
+  niet bestaat). Toegepast als multiplier op combined_volatility_sigma_now
+  op ALLE ZES plekken waar dat gebruikt wordt (de vijf GBM-aanroepen +
+  de economische-poort-berekening), met een harde bovengrens van 1.0.
+
+BUG GEVONDEN EN OPGELOST TIJDENS HET BOUWEN: een geautomatiseerd
+regex-script voor het toepassen van de vermenigvuldiging op de vijf
+GBM-locaties kreeg de inspringing verkeerd (0 spaces i.p.v. de
+daadwerkelijke, contextuele inspringing) -- veroorzaakte een
+IndentationError, gevonden via de gebruikelijke syntax-check en
+vervolgens handmatig, per-locatie hersteld op basis van de omliggende
+regels. Alle zes locaties nadien visueel geverifieerd.
+
+VOLLEDIG LIVE GEKOPPELD (na de eerstvolgende herstart die het
+gepersisteerde bestand inleest) -- nog GEEN datapunten totdat
+recalibrate_from_live_history.py voor het eerst gedraaid wordt EN er
+voldoende oude (>=24u) sentiment_log-historie is opgebouwd.
+
+## KRITIEKE BUG: __init__ per ongeluk afgebroken (28 aug 2026)
+
+Bij het toevoegen van _load_volatility_calibration_factor() werd deze
+methode-definitie per ongeluk MIDDEN IN __init__() geplaatst (na
+self._volatility_calibration_factor = ..., voor de rest van __init__'s
+oorspronkelijke inhoud). Omdat de nieuwe @staticmethod-definitie op
+DEZELFDE class-niveau-inspringing stond als __init__ zelf, beeindigde
+dit __init__ VOORTIJDIG -- alle daaropvolgende, oorspronkelijke
+__init__-inhoud (flash-event-velden, cooldowns, rpc_client-opzet, EN
+CRUCIAAL: self.lp_manager = None + self._setup_lp_manager()-aanroep)
+kwam PER ONGELUK terecht ALS ONBEREIKBARE CODE binnen de nieuwe
+_load_volatility_calibration_factor()-methode (na de return-statements
+van het try/except-blok daarin) -- syntactisch geldig Python, dus
+ast.parse() (de gebruikelijke syntax-check) miste dit volledig.
+
+GEVOLG IN PRODUCTIE: AttributeError: 'RegimeOrchestrator' object has no
+attribute 'lp_manager' bij het opstarten -- de bot crashte volledig,
+kon niet starten.
+
+HERSTELD: methode-definitie verplaatst naar NA het einde van __init__
+(na de self._setup_lp_manager()-aanroep), alle oorspronkelijke
+__init__-inhoud teruggezet op zijn juiste plek. Geverifieerd op DRIE
+niveaus (niet slechts syntax alleen, gezien deze fout PRECIES door een
+syntax-check heen glipte):
+1. ast.parse() -- syntax OK (had de fout dus niet gevonden, ter
+   illustratie van waarom dit niet genoeg is)
+2. AST-boom-inspectie: bevestigd dat self.lp_manager daadwerkelijk
+   BINNEN __init__'s eigen function-body valt (39 top-level statements)
+3. DAADWERKELIJKE INSTANTIATIE: RegimeOrchestrator(nep_db) aangeroepen,
+   bevestigd dat lp_manager/rpc_client/alle nieuwe attributen correct
+   bestaan en de juiste waarden hebben.
+
+LES VOOR VERVOLG: bij wijzigingen aan __init__() (of andere methodes
+waar een nieuwe methode-definitie NA een bestaande, lopende functie
+wordt toegevoegd), voortaan ALTIJD ook daadwerkelijk instantieren/
+aanroepen als onderdeel van de test, niet alleen ast.parse(). Een
+syntax-check bevestigt alleen dat de tekst geldig Python IS, niet dat
+de STRUCTUUR (welke code bij welke functie hoort) nog klopt zoals
+bedoeld.
+
+## Bug-hunt-ronde (28 aug 2026) -- drie echte bugs gevonden en opgelost
+
+Op verzoek, na de eerdere kritieke __init__-fout: systematisch verder
+gezocht naar structurele EN semantische bugs.
+
+**Structuur-controles (geen problemen gevonden):**
+- Geen dubbele methode-definities in RegimeOrchestrator (AST-gecontroleerd)
+- De drie langste functies (_rebalance_if_out_of_range, _cycle,
+  _execute_transition) sluiten allemaal logisch af, geen per-ongeluk-
+  samengevoegde code
+- combined_score_now EN combined_volatility_sigma_now: overal correct
+  toegewezen VOOR gebruik, in alle drie functies waar ze voorkomen
+  (AST-gecontroleerd, niet alleen visueel)
+- is_price_out_of_range() gebruikt de daadwerkelijke, actieve
+  self.state.tick_lower/tick_upper -- werkt correct samen met
+  variabele (soms bredere, gematigde-zone) ranges, geen hardcoded aanname
+
+**BUG 1 -- vangnet vuurt nooit meer na een flash-verdediging:**
+_safetynet_attempted is ontworpen om precies EENMAAL te vuren (bij
+opstarten), maar wordt daarna nooit teruggezet. Flash-verdediging
+(_trigger_flash_defense()) sluit de LP-positie, maar reset deze vlag
+niet -- na het aflopen van de verdedigingsperiode zou de bot dus VOOR
+ALTIJD vastzitten in lp_mode ZONDER positie, kapitaal los in de wallet,
+tot een handmatige herstart. OPGELOST: _safetynet_attempted = False
+toegevoegd in BEIDE succesvolle-sluiting-paden binnen
+_trigger_flash_defense() (normale afsluiting + de on-chain-verificatie-
+na-mislukking-route).
+
+**BUG 2 -- stuck-WHBAR-check ontbrak in het flash-verdedigingspad:**
+De drie eerder gebouwde toepassingen van check_and_recover_stuck_whbar()
+(opstarten, _rebalance_if_out_of_range, _execute_transition) misten het
+flash-verdedigingspad, terwijl close_position() daar exact hetzelfde
+driestaps-risico (decrease+collect, approve, unwrap) loopt. OPGELOST:
+toegevoegd aan de "still_open is False"-tak binnen
+_trigger_flash_defense().
+
+**BUG 3 -- flash-verdediging blokkeerde onterecht de trailing-stop
+tijdens BULLISH_REFLEX:** de cyclus-brede flash-verdedigings-check
+("if self._flash_defense_until > time.time(): return") gold
+ONVOORWAARDELIJK, ook tijdens BULLISH_REFLEX -- waar geen LP-positie
+open staat om te beschermen, maar waar de trailing-stop (een EIGEN
+kapitaalbeschermingsmechanisme) daardoor 30 minuten lang niet kon
+reageren op een eventuele crash. OPGELOST: de blokkade geldt nu alleen
+nog als self.current_regime == Regime.LP_MODE.
+
+**Vervolgens ontdekte, gerelateerde tweede laag van bug 3:** met de
+trailing-stop nu vrijgegeven tijdens flash-verdediging, zou een
+winst-name-transitie (BULLISH_REFLEX -> LP_MODE) een NIEUWE LP-positie
+proberen te openen MIDDENIN de nog actieve verdedigingsperiode --
+precies de volatiliteit vermijden die de verdediging beoogde. OPGELOST:
+binnen _execute_transition()'s LP_MODE-tak, als flash-verdediging nog
+actief is, wordt het heropenen uitgesteld (kapitaal blijft in HBAR/USDC,
+_safetynet_attempted wordt gereset zodat het vangnet het later
+vanzelf oppakt), met een duidelijke Telegram-melding.
+
+Alle drie bugfixes geverifieerd op zowel syntax (ast.parse) als
+daadwerkelijke instantiatie (RegimeOrchestrator(nep_db) aangeroepen,
+bevestigd geen crash) -- de les van de __init__-bug (syntax-check alleen
+is onvoldoende) consequent toegepast.
+
+## Dagelijks statusrapport naar Telegram (29 aug 2026)
+
+Op verzoek: elke dag om 09:00 een statusbericht met wallet-saldo (HBAR +
+SAUCE, met USD-waarde) en de samenstelling + waarde van de actieve
+LP-positie.
+
+**Nieuwe wiskunde, zelf afgeleid en geverifieerd:** lp_manager.py kreeg
+tick_to_price() en compute_position_amounts() -- standaard Uniswap-V3-
+liquiditeitswiskunde om te berekenen hoeveel token0/token1 een BESTAANDE
+positie op dit moment bevat, gegeven liquidity/tick_lower/tick_upper/
+huidige prijs. Geverifieerd via sympy (grensgevallen op P=Pa/P=Pb geven
+correct 0 terug) en functioneel getest met de daadwerkelijke, echte
+liquidity-waarde van vandaag (107986448226) -- eerste testpoging met
+VEROUDERDE tick-waarden (-8160/-5160, van vroeg vandaag, vóór talloze
+herbalanceringen) gaf onzinnige resultaten; met realistische, actuele
+ticks (rond -72648/-71066) gedroeg de functie zich correct in alle drie
+scenario's (onder/binnen/boven de range).
+
+**Bevestigd, terzijde:** WHBAR is daadwerkelijk token0 (8 dec), SAUCE
+token1 (6 dec) voor dit specifieke pool-adres -- geverifieerd via de
+daadwerkelijke, numerieke EVM-adresvergelijking (WHBAR-adres < SAUCE-
+adres), niet zomaar aangenomen.
+
+**Nieuwe bestanden:**
+- daily_status_report.py: haalt wallet-saldo, LP-positie-samenstelling
+  en actuele HBAR-prijs op, berekent USD-waarden, stuurt een
+  overzichtelijk Telegram-bericht. Functioneel getest met een volledig
+  gemockte omgeving (geen echte wallet/DB nodig) -- output klopte intern
+  consistent.
+- daily_status_cron.sh: cron-wrapper, zelfde patroon als
+  recalibrate_cron.sh. Installatie: crontab -e, voeg toe:
+  0 9 * * * /root/hbar_bot/daily_status_cron.sh >> /root/hbar_bot/logs/daily_status.log 2>&1
+
+NOG NIET GEINSTALLEERD IN CRONTAB OP DE VPS -- vereist een handmatige
+crontab -e-stap door de gebruiker na deployment.
+
+## Dagelijks statusrapport om 09:00 via Telegram (29 aug 2026)
+
+Op verzoek. BLEEK AL GROTENDEELS GEBOUWD te zijn (waarschijnlijk vóór de
+laatste /compact, buiten het zichtbare gespreksgeheugen) --
+daily_status_report.py en daily_status_cron.sh stonden al klaar. Grondig
+nagelopen i.p.v. blind vertrouwd, gezien eerdere ervaring vandaag met
+fouten die syntax-checks omzeilden:
+- compute_position_amounts() in lp_manager.py: bevestigd correct, enige
+  echte, gestandaardiseerde versie (een DUBBELE, zelf-toegevoegde versie
+  per ongeluk aangemaakt tijdens het narekenen, EN daarbij per ongeluk
+  de eerste regel van de bestaande compute_amount0_for_amount1()-
+  signatuur mee verwijderd -- beide fouten gevonden via syntax-check en
+  hersteld).
+- Alle imports, functiesignaturen, database-methode (get_active_lp_
+  position(), sleutels token_id/tick_lower/tick_upper), en adresresolutie
+  (resolve_testnet_v2_addresses() -- bevestigd testnet, niet per ongeluk
+  mainnet 0.0.4053945) stuk voor stuk geverifieerd.
+
+Rapport bevat: wallet-saldo (native HBAR + SAUCE, met USD-waarde),
+waarschuwing bij vastzittende WHBAR (hergebruikt de eerdere check),
+samenstelling en waarde van de actieve LP-positie (indien open, anders
+duidelijke "geen actieve positie"-melding), en de totale waarde.
+SAUCE wordt overal behandeld als ~1 USD (testnet-proxy voor USDC, zelfde
+aanname als de rest van de codebase de hele dag al gebruikt).
+
+Draait via cron (NIET als onderdeel van de continu draaiende bot-
+container zelf): `docker compose exec -T hbar-bot python3
+daily_status_report.py`, elke dag om 09:00. Installatie-instructies
+staan in daily_status_cron.sh zelf.
+
+STATUS: bestanden klaar en geverifieerd, NOG NIET gedeployed/crontab
+geinstalleerd op de VPS.
+
+## Structurele 50-HBAR-reserve + eenmalige consolidatie (30 aug 2026)
+
+Op verzoek: voortaan STRUCTUREEL minimaal 50 HBAR reserve aanhouden bij
+elke toekomstige positie-opening/herbalancering (niet alleen deze ene
+keer). MIN_GAS_RESERVE_HBAR verhoogd van 10.0 naar 50.0 in
+regime_orchestrator.py -- dit was al een bestaand, elders gebruikt
+reserve-mechanisme (_get_swappable_hbar_balance()), nu simpelweg
+opgehoogd en herbestempeld van pure gas-buffer naar algemene
+operationele veiligheidsreserve. Geverifieerd via daadwerkelijke
+instantiatie (orchestrator.MIN_GAS_RESERVE_HBAR == 50.0).
+
+Voor de eenmalige consolidatie zelf (positie 347 sluiten, opnieuw
+openen met alle beschikbare kapitaal minus de reserve): BEWUST GEEN
+losse open-positie-logica gebouwd (te veel duplicatie-risico van de
+GBM/sentiment-logica). In plaats daarvan: close_position_for_
+consolidation.py sluit alleen de bestaande positie, waarna een
+HERSTART van de bot-container het bestaande vangnet-mechanisme laat
+heropenen -- met de nieuwe reserve al actief, via de al-geteste,
+live-draaiende route.
+
+TWEE FOUTEN GEVONDEN EN GECORRIGEERD TIJDENS HET BOUWEN (vóór deployment):
+1. Eerste versie gebruikte MagicMock() voor de orchestrator's db-
+   parameter -- zou _reconcile_lp_position_on_startup() breken (heeft
+   ECHTE database-toegang nodig).
+2. Vergat aanvankelijk _reconcile_lp_position_on_startup() uberhaupt
+   aan te roepen -- LpManager.state.is_open is puur in-memory en
+   begint standaard op False, dus zonder deze aanroep zou het script
+   ONTERECHT denken dat er geen positie open staat, ook al staat
+   positie 347 daadwerkelijk open.
+
+BELANGRIJKE PROCEDURE-STAP: na het draaien van dit script is een
+HERSTART van de bot-container vereist (niet slechts wachten) -- de
+al-draaiende bot leest zijn eigen lp_manager.state alleen bij het
+opstarten opnieuw in, niet doorlopend.
+
+## KRITIEKE BUG: verkeerde prijs-eenheid in GBM-tick-berekening (30 aug 2026)
+
+Gevonden bij het uitzoeken waarom positie 348 (net geopend via het
+vangnet) volledig eenzijdig (100% HBAR, 0% SAUCE) bleek te zijn.
+
+**Kernontdekking**: GeckoTerminal's "price_usd" (bv. 0.075) en de pool's
+EIGEN, interne SAUCE-per-HBAR-koers (bv. 51,55, rechtstreeks via
+slot0()) zijn TWEE COMPLEET VERSCHILLENDE GROOTHEDEN -- empirisch
+bevestigd verhouding: ~685x. Dit betekent dat SAUCE (het testnet-token)
+NIET ~$1 waard is zoals de hele dag werd aangenomen, maar slechts ~$0,0015.
+
+**De bug**: price_to_tick() heeft de POOL'S EIGEN prijs nodig (via
+get_live_pool_price(), die rechtstreeks slot0() bevraagt) om tot een
+zinvolle tick te komen -- niet GeckoTerminal's USD-schatting. Van de vijf
+plekken waar compute_range_via_gbm() wordt aangeroepen, gebruikten er
+DRIE (de vangnet-route in _cycle(), en de LP_MODE-heropeningstak in
+_execute_transition(), inclusief de bijbehorende _ensure_balanced_
+liquidity_ratio()-aanroepen) de foutieve current_price (GeckoTerminal)
+in plaats van fresh_price (via get_live_pool_price()) -- de andere twee
+(_rebalance_if_out_of_range(), en de tweede/verse herberekening vlak
+voor het minten) waren AL correct.
+
+**Waarom positie 347 (van vóór vandaag) wel klopte**: die werd geopend
+via de oudere, reeds-langer-bestaande compute_range()-route, die AL
+langer correct get_live_pool_price() gebruikte.
+
+**OPGELOST**: alle drie foutieve locaties gecorrigeerd naar fresh_price
+(via get_live_pool_price(), zelfde patroon als de twee al-correcte
+locaties). Geverifieerd op syntax EN daadwerkelijke instantiatie.
+
+**NOG OPEN, VOOR EEN VOLGENDE SESSIE**:
+1. Positie 348 zelf staat nog met de VERKEERDE range open (voor deze fix
+   geopend) -- moet handmatig gesloten en opnieuw geopend worden met de
+   gecorrigeerde code.
+2. GROTER, NOG NIET AANGEPAKT probleem: overal waar de codebase SAUCE als
+   ~$1 behandelt voor USD-waardeberekeningen (daily_status_report.py,
+   evaluate_reflex_transition_economics()'s fee/IL-schattingen, alle
+   eerdere backtests van vandaag) is dit AANTOONBAAR ONJUIST -- SAUCE is
+   in werkelijkheid ~$0,0015 waard (afgeleid: hbar_price_usd /
+   pool_sauce_per_hbar_koers). Dit beinvloedt VEEL meer dan alleen de
+   tick-berekening, maar is NIET meer binnen deze sessie hersteld.
+
+## LET OP -- verplicht te herzien bij mainnet-migratie (USDC i.p.v. SAUCE)
+
+Belangrijke notitie voor de mainnet-overstap: de SAUCE-als-~$1-aanname
+(zie hierboven, "KRITIEKE BUG: verkeerde prijs-eenheid") is een
+TESTNET-SPECIFIEK probleem. Zodra de pool wordt vervangen door de
+ECHTE HBAR/USDC-pool op mainnet, vervalt dit specifieke euvel
+grotendeels vanzelf -- USDC is namelijk wel degelijk (nagenoeg) $1
+waard, in tegenstelling tot het testnet-SAUCE-token.
+
+TOCH EXPLICIET OPNIEUW CONTROLEREN bij die overstap, niet zomaar
+aannemen dat het dan vanzelf goed is:
+- Bevestig empirisch (net als vandaag gedaan voor SAUCE) dat
+  GeckoTerminal's price_usd en de pool's eigen, interne prijs (via
+  get_live_pool_price()) op mainnet WEL overeenkomen (of een bekende,
+  correcte omrekenfactor hebben) voordat er met echt kapitaal wordt
+  gehandeld.
+- Alle vandaag gecorrigeerde fresh_price/get_live_pool_price()-fixes
+  blijven hoe dan ook correct en nodig (die lossen een structureel,
+  niet testnet-specifiek probleem op: GeckoTerminal kan altijd een
+  eigen indexerings-vertraging hebben t.o.v. de daadwerkelijke,
+  live pool-staat, ongeacht welk token-paar het betreft).
+- USDC-decimalen op mainnet zijn 6 (zelfde als de huidige SAUCE-
+  aanname) -- waarschijnlijk geen wijziging nodig op dat vlak, maar
+  wel expliciet herbevestigen, niet aannemen.
+
+**Aanvulling (30 aug 2026)**: daily_status_report.py leidt nu SAUCE's
+werkelijke USD-waarde af via `sauce_price_usd = hbar_price_usd /
+pool_price_sauce_per_hbar` (rechtstreeks via get_live_pool_price()) --
+dit was NODIG omdat testnet-SAUCE geen 1:1 USD-proxy is. Bij de
+mainnet-overstap naar echte USDC wordt deze afgeleide berekening
+OVERBODIG (en zelfs VERKEERD als USDC's koers toevallig net niet exact
+$1 is door deze formule) -- vervang dit dan gewoon door
+`sauce_price_usd = 1.0` (of, voor extra precisie, een echte USDC/USD-
+koersbron), in plaats van de pool-ratio-afleiding te blijven gebruiken.
+
+## Automatisch bijstorten van overtollig kapitaal (30 aug 2026)
+
+Op verzoek: zodra er kapitaal bijgestort wordt (of anderszins los in de
+wallet komt te staan) terwijl de bot in LP_MODE met een open positie
+zit, wordt dat voortaan automatisch de pool in gestort -- in plaats van
+te wachten tot de eerstvolgende volledige out-of-range-herbalancering.
+
+- lp_manager.py: nieuwe deploy_additional_capital() -- voegt willekeurig
+  wallet-kapitaal toe aan een BESTAANDE positie via increaseLiquidity()
+  (hergebruikt hetzelfde multicall-patroon als het al-bestaande
+  claim_and_compound(), maar met gegeven bedragen i.p.v. geclaimde fees).
+- regime_orchestrator.py: nieuwe _deploy_excess_capital_if_available(),
+  aangeroepen elke cyclus, direct na de bestaande out-of-range-check.
+  Respecteert de 50-HBAR-reserve (via de bestaande _get_swappable_hbar_
+  balance()), een ondergrens (MIN_DEPLOYABLE_CAPITAL_HBAR=10, voorkomt
+  triviale gas-kosten), en een eigen cooldown (DEPLOY_CAPITAL_COOLDOWN_
+  SECONDS=600s). Hergebruikt de bestaande _ensure_balanced_liquidity_
+  ratio() om het overtollige bedrag correct te balanceren vóór het
+  bijstorten, en get_live_pool_price() voor de juiste, pool-interne
+  prijs (zelfde les als de eerdere kritieke tick-bug van vandaag).
+
+Geverifieerd op syntax EN daadwerkelijke instantiatie (beide nieuwe
+instellingen bevestigd correct: 10.0 HBAR, 600.0s).
+
+STATUS: klaar, NOG NIET gedeployed naar de VPS.
+
+## Hysterese/dode-zone voor de gematigde-zone-drempel (30 aug 2026)
+
+Op verzoek, naar aanleiding van een voorgestelde Focused/Balanced/Relaxed-
+state-machine-strategie. Onze bestaande drie-standen-indeling (zwak/
+gematigd/sterk) kwam al grotendeels overeen met dat voorstel, maar MISTE
+een expliciete hysterese-regel -- bij een signaal dat rond
+MODERATE_SENTIMENT_THRESHOLD (0.30) schommelde, kon de bot elke cyclus
+heen-en-weer wisselen tussen normale en gematigde-zone-breedte, wat
+onnodige gas-kosten had kunnen opleveren.
+
+OPGELOST: determine_gbm_confidence_level() -> RegimeOrchestrator.
+_determine_gbm_confidence_level() (stateful i.p.v. een losse functie).
+Instappen bij MODERATE_SENTIMENT_THRESHOLD=0.30, maar pas uitstappen bij
+MODERATE_ZONE_EXIT_THRESHOLD=0.20 (lager) -- tussen deze twee drempels in
+blijft de bot in zijn HUIDIGE modus. Nieuwe self._in_moderate_zone-vlag
+in __init__. Alle vijf aanroeplocaties bijgewerkt. Functioneel getest met
+een schommelend signaal (0.15->0.31->0.29->0.32->0.25->0.22->0.18) --
+bevestigd: blijft correct in gematigde modus tot het signaal duidelijk
+onder de uitstapdrempel zakt, geen enkel "stuiteren".
+
+De oude, stateloze functie is bewust BEHOUDEN onder een nieuwe naam
+(determine_gbm_confidence_level_stateless()) voor eventueel losstaand
+gebruik/tests, maar de live bot gebruikt nu uitsluitend de nieuwe,
+stateful methode.
+
+**Nog NIET meegenomen uit het bredere voorstel** (bewust, gezien de
+sessie al zeer omvangrijk is):
+- Een expliciete "Focused" (ultra-strakke, ±0.5-1%) modus als APARTE
+  staat -- onze huidige GBM-breedte schaalt al continu met volatiliteit,
+  dus bij lage sigma wordt de range al vanzelf smal, maar niet als
+  EXPLICIETE, aparte state met eigen drempels.
+- Hysterese op REGIME_THRESHOLD (0.55, voor volledig uitstappen) zelf --
+  heeft al andere beschermingen (economische poort, regime-cooldown),
+  maar geen EXPLICIETE dode-zone zoals nu bij de gematigde-zone-drempel.
+- De volledige LVR-gebaseerde beslissingsmatrix als expliciet triggermechanisme
+  (LVR-wiskunde staat al klaar van eerder vandaag, discrete formule
+  geverifieerd, maar nog niet gekoppeld aan een live state-transitie).
+
+## Twee zaken deze ronde: RPC-belasting-onderzoek + LP-strategievoorstel (30 aug 2026)
+
+### 1. Onderzoek naar mogelijk zelf-veroorzaakte RPC-belasting
+
+Op verzoek: uitgegaan van "het ligt aan de code, niet aan hashio.io".
+GEVONDEN, ECHTE BUG: _get_swappable_hbar_balance() en _get_swappable_
+usdc_balance() deden ELKE keer een verse RPC-aanroep, zonder enige
+caching -- en werden MEERDERE keren per cyclus aangeroepen (rebalance-
+check, de vandaag eerder toegevoegde kapitaal-bijstort-check, etc.).
+De nieuwe kapitaal-bijstort-functie verdubbelde deze belasting nog eens
+extra.
+
+OPGELOST: korte TTL-cache (5 seconden) toegevoegd aan beide functies.
+BELANGRIJKE, MEEGENOMEN CORRECTIE: de cache wordt expliciet ongeldig
+gemaakt na elke succesvolle swap (in _run_swap_and_log(), de gedeelde
+swap-functie) -- anders zou een her-lezing vlak na een swap (bv. binnen
+_deploy_excess_capital_if_available(), na _ensure_balanced_liquidity_
+ratio()'s eigen swap) een VEROUDERDE waarde kunnen teruggeven, wat
+opnieuw een INSUFFICIENT_TOKEN_BALANCE-fout had kunnen veroorzaken.
+
+EERLIJKE KANTTEKENING: dit lost een REELE, gevonden inefficiëntie op,
+maar bewijst niet met zekerheid dat dit de ENIGE of zelfs de
+HOOFDoorzaak was van de eerdere 502-fouten -- een directe curl-check
+bevestigde destijds ook dat hashio.io zelf op dat moment een 502 gaf.
+Waarschijnlijk allebei tegelijk een rol: onze eigen, licht overmatige
+belasting EN een reeds-kwetsbare externe relay.
+
+Geverifieerd op syntax EN daadwerkelijke instantiatie.
+
+### 2. Expliciet Focused/Balanced/Relaxed-LP-strategievoorstel
+
+lp_strategy_state_machine.py (nieuw): formaliseert onze bestaande zwak/
+gematigd/sterk-indeling onder de voorgestelde namen, MET hysterese op
+BEIDE overgangen (niet alleen de gematigde-zone-drempel van eerder
+vandaag). Relaxed-drempels EXACT zoals voorgesteld (instappen >0.60,
+uitstappen <0.45). Focused-drempels analoog (instappen <0.15,
+uitstappen >0.25) -- AANNAME, geen empirisch geijkte waarde.
+
+Functioneel getest: hysterese op beide grenzen bevestigd correct (geen
+stuiteren bij een schommelend signaal rond 0.60/0.45 EN rond 0.15/0.25),
+en de Balanced-scheefstand volgt correct sentiment_mu.
+
+STATUS: dit is een LOSSTAANDE, GETESTE module -- BEWUST NOG NIET
+gekoppeld aan de live bot. De bot gebruikt op dit moment nog steeds de
+eerdere, functioneel vergelijkbare drie-standen-indeling
+(_determine_gbm_confidence_level() in regime_orchestrator.py, met
+hysterese op de gematigde-zone-drempel alleen). Wiring van dit nieuwe,
+explicietere model (of vervanging van het bestaande) is een aparte,
+nog te nemen beslissing voor een volgende sessie.
+
+## KRITIEK: automatisch-bijstorten veroorzaakte een herhaal-loop (30 aug 2026)
+
+De net-gebouwde _deploy_excess_capital_if_available() bleek in de
+praktijk een herhaal-loop te veroorzaken -- elke cyclus (elke ~60s)
+probeerde de bot een absurd groot, onrealistisch swap-bedrag (bv.
+104.630 SAUCE, terwijl de wallet er maar ~19.617 had), wat telkens
+mislukte met "INSUFFICIENT_TOKEN_BALANCE" (contract-revert). Elke
+mislukte poging kost gas, dus dit had significant, doelloos kapitaal
+kunnen opeten als het langer had doorgelopen.
+
+ONDERZOCHT: alle vier aanroepen van _ensure_balanced_liquidity_ratio()
+bleken al correct fresh_price (pool-schaal) te gebruiken, niet de
+eerder-gevonden current_price-bug van vandaag -- de exacte oorzaak van
+dit specifieke, absurde swap-bedrag is dus NOG NIET gevonden. Mogelijk
+een cumulatief effect van herhaalde, deels-geslaagde eerdere pogingen
+die de wallet-samenstelling steeds verder uit balans brachten, of een
+aparte rekenfout in de excess_hbar_needed/usdc_to_swap-berekening zelf.
+
+VEILIGHEIDSMAATREGEL GENOMEN: _deploy_excess_capital_if_available()
+TIJDELIJK UITGESCHAKELD (de aanroep in _cycle() is uitgecommentarieerd,
+de functie zelf blijft bestaan voor later hergebruik na een grondiger
+onderzoek). De bot draait weer veilig verder ZONDER deze specifieke,
+nieuwe functionaliteit, tot dit apart, rustig is uitgezocht en beter
+getest (bv. met expliciete, stap-voor-stap-logging van elke
+tussenwaarde in de berekening, niet alleen het eindresultaat).
+
+Bot was tussentijds handmatig gestopt (docker compose stop hbar-bot) op
+verzoek van de gebruiker, positie 349 en kapitaal bevestigd ongewijzigd/
+veilig gebleven tijdens de stop.
+
+## Externe feedback verwerkt (30 aug 2026)
+
+Waardevolle, gerichte feedback ontvangen op de architectuur van vandaag.
+Vier punten, twee direct gebouwd, een onderzocht (geen sluitend
+antwoord), een bewust nog open gelaten.
+
+### Punt 4 (bijstort-bug) -- onderzocht, geen sluitend antwoord
+Twee hypotheses getest (gas-reservering, prijsverschuiving-tijdens-
+transactie) tegen _ensure_balanced_liquidity_ratio()'s daadwerkelijke
+formule, met realistische waarden. Zelfs in het meest extreme geval
+(0 beschikbare HBAR) kwam de berekening uit op ~8.049 SAUCE, ver onder
+de daadwerkelijk waargenomen 104.630 -- voor dat bedrag zou de wallet
+~255.000 SAUCE moeten hebben bevat, wat nergens is waargenomen. Geen
+sluitende verklaring gevonden; de functie blijft daarom terecht
+uitgeschakeld.
+
+### Punt 1 (trage flash-detectie) -- GEBOUWD
+Nieuwe, snelle prijs-gebaseerde flash-detectie TOEGEVOEGD aan de
+60-seconden-hoofdcyclus zelf (naast de bestaande, langzamere sentiment-
+gebaseerde detectie elke 5 minuten). Vergelijkt de prijs met die van de
+vorige cyclus; bij een beweging >3% binnen 60s (AANNAME, geen
+empirisch geijkte waarde) wordt DIRECT dezelfde _trigger_flash_defense()
+aangeroepen als bij een sentiment-sprong. Hergebruikt de bestaande
+FlashEventResult-dataclass (i.p.v. een ad-hoc object) voor consistentie.
+_trigger_flash_defense()'s Telegram-bericht aangepast zodat het correct
+leesbaar blijft bij BEIDE triggertypes (sentiment EN prijs).
+
+### Punt 3 (GBM onderschat fat tails) -- GEBOUWD
+15%-extra-marge (AANNAME, exact zoals voorgesteld) toegevoegd aan de
+ONDERKANT van elke GBM-berekende range, in compute_gbm_confidence_
+interval(). Wiskundig geverifieerd: de verhouding tussen lower_price
+met en zonder de buffer is EXACT 0.85 (15% lager), zowel via de
+functie zelf als een onafhankelijke, handmatige herberekening.
+
+### Punt 2 (LLM-confidence onbetrouwbaar, bron-consensus als alternatief)
+-- BEWUST NOG NIET GEBOUWD. Vereist het herkennen/groeperen van
+MEERDERE, verschillende bronnen die over hetzelfde onderwerp berichten
+(deduplicatie/clustering van headlines), een aanzienlijk grotere
+architecturale wijziging dan de andere drie punten. Goed idee voor een
+aparte, volgende sessie.
+
+Beide gebouwde stukken geverifieerd op syntax EN (waar van toepassing)
+daadwerkelijke instantiatie/functionele test.
+
+## Verder onderzoek naar de bijstort-bug + diagnostische logging (30 aug 2026)
+
+Vervolgonderzoek op de eerder gevonden, onverklaarde herhaal-loop.
+Twee nieuwe hypotheses systematisch getest, GEEN VAN BEIDE bevestigd:
+- Grenswaarden-tests over vijf verschillende tick-range-scenario's
+  (exact rond de prijs, ver erboven/eronder, zeer smal, zeer breed) x
+  drie bedragen -- geen enkel scenario gaf een absurd resultaat, max
+  ~580 HBAR nodig in het meest extreme geval.
+- Decimalen-mismatch-hypothese (base.usdc_decimals zou 18 kunnen zijn
+  i.p.v. 6 op testnet, per een bestaande code-comment) -- empirisch
+  gecontroleerd: in de huidige configuratie is dit correct 6, en
+  base.usdc wijst naar HETZELFDE adres als het los-hardcoded SAUCE-
+  adres elders. Geen mismatch gevonden.
+
+Gezien het exacte scenario ondanks meerdere pogingen niet te
+reproduceren blijkt: UITGEBREIDE DIAGNOSTISCHE LOGGING toegevoegd aan
+_ensure_balanced_liquidity_ratio() zelf (print van elke tussenwaarde:
+hbar_raw, usdc_raw, needed_usdc_for_full_hbar, needed_hbar_for_full_usdc,
+excess-bedragen, uiteindelijk swap-bedrag) -- dit verandert niets aan
+het gedrag, maar zorgt dat een eventuele VOLGENDE, vergelijkbare
+storing wel volledig te herleiden is. Actief voor ALLE aanroepen van
+deze functie, dus ook de al-actieve herbalancerings-route (niet alleen
+de nog-uitgeschakelde bijstort-functie) -- geeft dus ook doorlopend
+extra inzicht in de reeds actieve code.
+
+Geverifieerd op syntax EN daadwerkelijke instantiatie.
+
+## Bijstort-functie weer aangezet, met veiligheidsklem (30 aug 2026)
+
+Op verzoek -- belangrijk voor mainnet, waar de wallet 100% exclusief
+door de bot gebruikt wordt, dus automatisch reageren op bijstortingen
+is functioneel belangrijk.
+
+TOEGEVOEGD vóór het heractiveren: harde veiligheidsklem in BEIDE
+richtingen van _ensure_balanced_liquidity_ratio() -- ongeacht welke
+berekening tot een swap-bedrag leidt, wordt NOOIT meer geswapt dan de
+daadwerkelijke, actuele balans (met 5% marge voor afronding/gas). Bij
+een berekend bedrag dat de balans overschrijdt: swap NIET uitvoeren,
+duidelijke Telegram-melding sturen ("balanceringsklem geactiveerd"),
+en de [balans-diagnose]-logs (eerder vandaag toegevoegd) geven de
+volledige context. Dit voorkomt een HERHALING van de eerdere loop,
+ook zonder de exacte, onderliggende rekenfout te kennen.
+
+_deploy_excess_capital_if_available() weer actief aangeroepen in
+_cycle() (niet langer uitgecommentarieerd).
+
+Geverifieerd op syntax EN daadwerkelijke instantiatie.
+
+AANBEVOLEN VOLGENDE STAP: klein, gecontroleerd testen door een
+bescheiden bedrag HBAR naar de wallet te sturen en de logs (nu met
+volledige [balans-diagnose]-details) op te volgen.
+
+## Vervolgprobleem gevonden en opgelost: klem werkte, maar aanroeper negeerde het (30 aug 2026)
+
+Na het heractiveren van de bijstort-functie: de nieuwe veiligheidsklem
+WERKTE correct (blokkeerde een berekend bedrag van 107.230 SAUCE tegen
+een balans van 19.617) -- maar de aanroepende functie ging DAARNA toch
+door met de daadwerkelijke storting, met de balans die nog steeds niet
+gebalanceerd was, wat een TWEEDE fout gaf (INSUFFICIENT_TOKEN_BALANCE).
+
+OORZAAK: _ensure_balanced_liquidity_ratio() gaf altijd None terug
+(geen retourwaarde), dus de aanroeper kon niet weten of het balanceren
+daadwerkelijk was gelukt of door de klem was tegengehouden.
+
+OPGELOST: functie retourneert nu bool (True = gelukt of niet nodig,
+False = klem geactiveerd). ALLE VIER aanroeplocaties bijgewerkt om dit
+te controleren en correct af te breken bij False:
+1. _deploy_excess_capital_if_available() -- nieuwe check, breekt af
+2. _rebalance_if_out_of_range() -- nieuwe check, stuurt een duidelijke
+   Telegram-melding en breekt af i.p.v. door te gaan met heropenen
+3. Het vangnet in _cycle() -- swap_success was HARDCODED op True,
+   genegeerd de daadwerkelijke uitkomst; nu gebaseerd op de echte
+   retourwaarde (de bestaande "if swap_success:"-check verderop werkt
+   hierdoor nu ook daadwerkelijk zoals bedoeld)
+4. De LP_MODE-heropeningstak in _execute_transition() -- all_succeeded
+   was OOK hardcoded op True, zelfde fix toegepast
+
+Geverifieerd op syntax EN daadwerkelijke instantiatie. Bevestigd: geen
+enkele aanroep van _ensure_balanced_liquidity_ratio() laat de
+retourwaarde meer ongebruikt liggen.
+
+## DOORBRAAK: de oorzaak van de bijstort-loop eindelijk gevonden (30 aug 2026)
+
+Dankzij de eerder toegevoegde [balans-diagnose]-logging: volledige
+tussenwaarden verkregen tijdens een daadwerkelijke, live herhaling.
+
+BEVINDING: dit is GEEN rekenfout. Empirisch bevestigd via tick_to_price():
+positie 349's range [-6900,-6420] komt overeen met prijs [50,1593,
+52,6256]. De daadwerkelijke, actuele prijs (50,3402) stond op dat
+moment op slechts 7,33% IN die range -- vlak bij de ONDERKANT. Bij
+geconcentreerde liquiditeit (Uniswap V3) vereist het toevoegen van
+NIEUWE, proportionele liquiditeit dicht bij de rand van een smalle
+range een extreem scheve token0:token1-verhouding -- dit is een
+fundamenteel, correct wiskundig gevolg van hoe V3-liquiditeit werkt,
+geen bug in onze formules. De eerder toegevoegde veiligheidsklem deed
+dus PRECIES het juiste door te weigeren.
+
+HET ECHTE PROBLEEM zat in wat er NA de klem gebeurde: de aanroeper gaf
+teveel om deze (normale, verwachte) situatie -- stuurde een
+alarmerende "HANDMATIGE CONTROLE"-Telegram-melding EN (vóór de
+eerdere fix van vandaag) probeerde alsnog door te gaan met storten.
+
+OPGELOST (verfijning van de eerdere klem-fix):
+- Beide klem-locaties in _ensure_balanced_liquidity_ratio() sturen niet
+  langer een alarmerende telegram_notify.report_error() -- alleen nog
+  een stille [balans-diagnose]-logregel, met duidelijke uitleg dat dit
+  waarschijnlijk komt doordat de prijs dicht bij de rand van de huidige
+  range staat.
+- In combinatie met de eerdere fix (aanroeper respecteert nu de
+  retourwaarde en breekt correct af): er wordt in dit scenario GEEN
+  ENKELE on-chain transactie meer geprobeerd -- dus ook geen sluipende
+  gaskosten meer per cyclus, alleen een stille logregel.
+- Het overtollige kapitaal wacht nu gewoon op de eerstvolgende,
+  natuurlijke out-of-range-herbalancering, die een NIEUWE, beter
+  gecentreerde range kiest (waar deze extreme verhouding zich niet
+  meer voordoet).
+
+Geverifieerd op syntax EN daadwerkelijke instantiatie.
+
+## Drie openstaande punten afgerond (30 aug 2026)
+
+### 1. Dagelijks 09:00-rapport: crontab geinstalleerd
+Non-interactief toegevoegd (via `(crontab -l | grep -v ...; echo ...) |
+crontab -`, i.p.v. het interactieve `crontab -e`). Bevestigd via
+crontab -l: de volledige regel staat correct in de crontab, naast de
+al-bestaande andere geplande taken (IBKR-strategie, VIX-rider, etc.).
+
+### 2. Hysterese op REGIME_THRESHOLD (0.55) toegevoegd
+_determine_target_regime() gebruikt nu self.current_regime ZELF als
+geheugen (geen nieuwe status-variabele nodig) -- instappen in een
+reflex-regime bij REGIME_THRESHOLD (0.55), maar pas terug naar lp_mode
+bij de lagere REGIME_THRESHOLD_EXIT (0.40). Functioneel getest met een
+correcte, SEQUENTIELE simulatie (current_regime daadwerkelijk bijgewerkt
+tussen aanroepen, niet kunstmatig vastgezet) -- bevestigd: blijft
+correct in bullish_reflex tot 0.39, blijft daarna correct in lp_mode
+bij 0.42 en 0.50 (beide onder de instapdrempel), stapt pas weer in bij
+0.56.
+
+### 3. flash_defense_until gepersisteerd
+bot_regime_state uitgebreid met een flash_defense_until-kolom (DB-
+migratie vereist, zie hieronder). save_regime_state()/get_regime_state()
+uitgebreid. TWEE plekken slaan nu op: de bestaande, algemene save-
+locatie (na elke geslaagde overgang) EN een NIEUWE, EXPLICIETE
+save-aanroep binnen _trigger_flash_defense() zelf (die niet via het
+normale overgangs-pad loopt). Bij het opstarten: als de opgeslagen
+waarde nog in de toekomst ligt, wordt de verdedigingsperiode hersteld
+mét een Telegram-bevestiging.
+
+Alle drie geverifieerd op syntax EN (waar van toepassing) daadwerkelijke
+instantiatie/functionele test.
+
+**VEREISTE DATABASE-MIGRATIE** (zelfde patroon als eerder vandaag bij
+volatility_sigma) -- moet HANDMATIG gedraaid worden op de bestaande,
+live database vóór het deployen van deze code:
+```sql
+ALTER TABLE bot_regime_state ADD COLUMN IF NOT EXISTS flash_defense_until DOUBLE PRECISION DEFAULT 0.0;
+```
+
+### Nog steeds open (grotere stukken, apart aan te pakken)
+- LP-strategie-state-machine daadwerkelijk aan de live bot koppelen
+- Mean-reversion-detectie aan een echte actie koppelen
+- Continue LVR-formule verifiëren
+- Bron-consensus-confidence (bewust, te grote wijziging)
+
+## Continue LVR-formule alsnog volledig geverifieerd (30 aug 2026)
+
+De eerdere "niet geverifieerd"-status (28 aug 2026) bleek een fout in
+de VERIFICATIEPOGING zelf te zijn, niet in de formule: destijds werd
+de tweede afgeleide van een LOSSE reserve (d²x/dP²) berekend, terwijl
+Gamma in de LVR-literatuur specifiek de tweede afgeleide van de TOTALE
+POOLWAARDE betekent (analoog aan een optie-Gamma).
+
+Correct afgeleid met sympy: V(P) = 2*L*sqrt(P) (poolwaarde-functie),
+Gamma = d²V/dP² = -L/(2*P^1.5), verlies-snelheid via het standaard
+Ito/optie-Greeks-resultaat (-0.5*sigma^2*P^2*Gamma) = exact
+0.25*sigma^2*L*sqrt(P) -- identiek aan de bestaande formule, verschil
+geverifieerd als 0.
+
+EXTRA cross-validatie: de discrete formule (al eerder bevestigd)
+Taylor-ontwikkeld rond een kleine prijsverandering, met E[eps^2]=
+sigma^2*dt (GBM-variantie) ingevuld -- komt EXACT overeen met de
+continue snelheid * dt. Beide formules dus nu onafhankelijk,
+dubbel bevestigd consistent met elkaar.
+
+STATUS GEWIJZIGD: compute_continuous_lvr_rate() mag nu WEL gebruikt
+worden voor besluitvorming (was eerder expliciet afgeraden). Nog
+steeds NIET gekoppeld aan een live actie -- dat blijft een aparte,
+volgende stap.
+
+## Mean-reversion gekoppeld aan een conservatieve, echte actie (30 aug 2026)
+
+In plaats van de complexere, oorspronkelijk voorgestelde "strakke
+positie net boven de gecrashte prijs"-strategie (een geheel nieuwe
+positie-plaatsingslogica, meer risico) -- een VEEL conservatievere,
+veiligere actie gekozen: als mean-reversion wordt gedetecteerd TIJDENS
+een actieve flash-verdedigingsperiode, wordt die periode gewoon
+VROEGTIJDIG beeindigd (i.p.v. de volledige 30 minuten uit te zitten),
+zodat de bot sneller weer normaal (LP_MODE) kan hervatten als de piek
+een overreactie bleek.
+
+- regime_orchestrator.py: twee nieuwe dicts (_mean_reversion_pre_event_
+  score, _mean_reversion_event_score, per asset) leggen bij elke
+  gedetecteerde flash-event de scores vlak-voor en tijdens vast.
+- Bij elke daaropvolgende sentiment-verversing, ZOLANG de
+  verdedigingsperiode nog loopt: detect_mean_reversion() aangeroepen.
+  Bij bevestiging: periode direct beeindigd, gepersisteerde status
+  ONMIDDELLIJK bijgewerkt (voorkomt dat een herstart vlak erna de oude,
+  inmiddels-stale waarde zou herstellen), duidelijke Telegram-melding.
+
+Geverifieerd op syntax EN daadwerkelijke instantiatie.
+
+## LP-strategie-state-machine: BEWUST NIET GEKOPPELD (30 aug 2026)
+
+Na overweging: het koppelen van lp_strategy_state_machine.py (expliciete
+Focused/Balanced/Relaxed, volatiliteit-gedreven) aan de live bot zou
+NAAST het al-bestaande, al-werkende hysterese-systeem
+(_determine_gbm_confidence_level(), sentiment-gedreven) komen te
+draaien -- twee PARALLELLE, deels-overlappende classificatiesystemen op
+verschillende signalen (volatiliteit vs. sentiment). Het risico op
+verwarrende, elkaar tegensprekende beslissingen of subtiele
+integratiebugs (gezien hoeveel van dat soort bugs vandaag al zijn
+gevonden in vergelijkbare, minder complexe wijzigingen) weegt op dit
+moment zwaarder dan de meerwaarde. BEWUST uitgesteld tot een aparte,
+toegewijde sessie die zich puur op deze ene integratie kan richten --
+niet in dezelfde sessie als de rest van vandaag.
+
+## Live pool-APR toegevoegd -- stap 1: informatief, nog geen beslissing (30 aug 2026)
+
+Op verzoek: kan de bot strategie bepalen op basis van de huidige,
+daadwerkelijke APR van de pool? Bevinding: compute_fees_apr() (correcte
+implementatie van SaucerSwap's eigen formule) bestond al, maar de
+docstring vermeldde EXPLICIET dat er nog geen bevestigde bron voor
+volume_24h gevonden was.
+
+GEVONDEN: GeckoTerminal's PoolSnapshot (die elke cyclus AL wordt
+opgehaald voor de prijs) bevat ALLEBEI de benodigde velden
+(volume_24h_usd EN liquidity_usd) -- deze werden voorheen genegeerd
+(alleen .price_usd werd gebruikt). Dit vult het eerder-openstaande gat
+volledig, ZONDER extra API-aanroep nodig te hebben.
+
+GEBOUWD (bewust, stapsgewijs -- eerst alleen berekenen/loggen, NOG NIET
+aan een beslissing koppelen): elke cyclus wordt nu een live, gemiddelde
+pool-APR berekend en gelogd (self._cached_pool_fees_apr). Gebruikt de
+pool's TOTALE liquiditeit als l_bal (SaucerSwap's eigen, gedocumenteerde
+vereenvoudiging) -- geeft dus het POOL-GEMIDDELDE, niet specifiek onze
+eigen, geconcentreerde positie (die doorgaans hoger ligt).
+
+Geverifieerd op syntax, daadwerkelijke instantiatie, EN de onderliggende
+compute_fees_apr()-formule zelf met realistische waarden (hoger volume
+geeft correct een hogere APR).
+
+VOLGENDE STAP (nog niet gedaan): deze live APR daadwerkelijk als signaal
+meewegen in de strategiekeuze (bv. hoge APR -> pleit voor Focused/
+strakke range, lage APR -> minder reden om strak te zitten) -- bewust
+apart gehouden van deze eerste, veilige, informatieve stap.
+
+## STARTPUNT VOLGENDE SESSIE: multi-positie-ondersteuning + tranche-strategie (30 aug 2026)
+
+Belangrijk, extern aangeleverd inzicht dat de bijstort-problematiek van
+vandaag verklaart en oplost -- vastgelegd als concreet startpunt voor
+een aparte, toegewijde sessie (bewust NIET vanavond gebouwd, gezien de
+omvang van de benodigde architectuurwijziging).
+
+### Het kerninzicht: "tranches" i.p.v. de bestaande positie forceren
+
+Vandaag ontdekten we (via [balans-diagnose]-logging): het bijstorten
+van kapitaal in een BESTAANDE, smalle positie kan een onrealistische
+swap-ratio vereisen zodra de prijs dicht bij de rand van die positie's
+range staat (empirisch: prijs op 7,33% in de range gaf een benodigde
+swap van 107x de beschikbare balans). Dit is GEEN bug, maar een
+fundamenteel gevolg van geconcentreerde-liquiditeit-wiskunde.
+
+DE OPLOSSING (aangeleverd voorbeeld, "Strategie B"): in plaats van de
+bestaande positie te forceren via increaseLiquidity() (die de EXACTE
+ratio van de bestaande, mogelijk scheve range moet matchen), open je
+een NIEUWE, aparte NFT-positie met een VERS, gecentreerd bereik rond de
+HUIDIGE prijs (via de al-bestaande, al-geteste open_position()/
+compute_range_via_gbm()-machinerie). Dit omzeilt het ratio-probleem
+volledig, en is bovendien veel goedkoper (rekenvoorbeeld 3: $0,15
+swap-kosten voor een tranche vs. $6,00 voor het forceren van de
+bestaande positie -- 40x goedkoper).
+
+### Waarom dit een grote wijziging is (niet een kleine patch)
+
+De VOLLEDIGE codebase is gebouwd rond precies EEN positie tegelijk:
+- lp_manager.state (token_id, tick_lower, tick_upper, is_open) --
+  enkelvoudig
+- active_lp_position-databasetabel -- enkelvoudig (1 rij max)
+- Elke herbalancerings-/vangnet-/rapportage-functie neemt aan dat er
+  hooguit een positie is
+
+Voor ECHTE multi-positie-ondersteuning moet dit overal aangepast worden
+naar een LIJST van posities, inclusief:
+- Database-schema (active_lp_position -> meerdere rijen toestaan)
+- Rapportage (daily_status_report.py -- som over alle posities)
+- Herbalancering: WELKE positie(s) herbalanceren bij out-of-range?
+  Blijven tranches apart bestaan, of worden ze op enig moment
+  samengevoegd tot een enkele, nieuwe positie?
+- Sluiten (bv. bij flash-verdediging): ALLE posities moeten dan sluiten,
+  niet slechts een
+- Vangnet-logica: wat betekent "geen positie open" nog in een multi-
+  positie-wereld?
+
+### Drie rekenvoorbeeld-scenario's (aangeleverd, ter referentie voor de
+volgende sessie -- bevestigen de bestaande economische-poort-logica en
+motiveren de tranche-aanpak):
+1. Focused-herbalancering: $12 kosten vs. $35,62/dag extra baten ->
+   terugverdientijd 8 uur (bevestigt de bestaande economische-poort-
+   aanpak, geen wijziging nodig)
+2. Relaxed-verdediging: hoge APR (300%) tijdens een crash kan ONDANKS
+   de aantrekkelijke fee-inkomsten alsnog een NETTO verlies betekenen
+   door LVR (voorbeeld: +$82 fees, -$250 LVR, netto -$168) -- motiveert
+   om LVR expliciet mee te wegen bij toekomstige Relaxed-beslissingen,
+   niet puur op APR af te gaan
+3. Tranche vs. volledig forceren: $0,15 vs. $6,00 swap-kosten -- de
+   directe, cijfermatige onderbouwing voor de tranche-aanpak
+
+### Architectuur-verfijningen (aangeleverde feedback, 30 aug 2026)
+
+Belangrijke aanvullingen op het tranche-plan hierboven, om fragmentatie
+en oncontroleerbare kosten te voorkomen:
+- **Database-schema**: active_lp_position uitbreiden met is_primary
+  (boolean) en parent_regime_id, i.p.v. simpelweg meerdere losse rijen
+  toe te staan zonder onderscheid.
+- **MAX_ACTIVE_TRANCHES = 3** (hardcoded limiet) -- bij het bereiken
+  daarvan wordt extra kapitaal vastgehouden tot een natuurlijke
+  consolidatie, NIET blind een vierde tranche geopend.
+- **Lazy consolidation**: nooit puur opruimen omwille van opruimen --
+  alleen samenvoegen tot een nieuwe hoofdpositie bij een macro-regime-
+  wijziging, of wanneer de prijs buiten de is_primary-positie's range
+  valt (dezelfde trigger als de bestaande out-of-range-herbalancering).
+  **BELANGRIJKE CORRECTIE (30 aug 2026, op aangeleverde feedback)**: dit
+  criterium alleen is een valstrik -- als de prijs wegdrijft van een
+  SUB-tranche maar binnen de bredere range van de is_primary-positie
+  blijft, merkt de bot dit NIET op (want die kijkt alleen naar de
+  hoofdpositie). De sub-tranche wordt dan stilzwijgend 100% eenzijdig,
+  stopt met fee-verdienen, en lijdt onopgemerkt impermanent loss.
+  _rebalance_if_out_of_range() moet daarom itereren over ALLE actieve
+  tranches (niet alleen is_primary) en een individuele, uit-bereik-
+  geraakte sub-tranche apart sluiten/herinvesteren, los van de status
+  van de hoofdpositie.
+- **Flash Defense als loop**: _trigger_flash_defense() moet ALLE actieve
+  posities sluiten (for-loop), met een eigen try/except PER positie --
+  een mislukking bij positie 2 mag de sluiting van positie 3 niet
+  blokkeren.
+
+### Aanbevolen eerste stap voor de volgende sessie
+Begin met een VEREENVOUDIGDE versie (niet meteen de volle
+architectuur): tranches als aparte, MINIMAAL bijgehouden extra posities
+(bv. een simpele lijst van token_id's, apart van de hoofdpositie), die
+vooralsnog niet individueel actief beheerd worden (geen eigen
+herbalancering per tranche) -- alleen correct meegeteld in rapportage
+en meegesloten bij een volledige sluiting (flash-verdediging, etc.).
+Volledige, actief beheerde multi-positie-ondersteuning is een grotere
+vervolgstap daarna.
+
+## Vervolgprobleem: mislukte balans-ophaal kon bijstorten op verkeerd been zetten (30 aug 2026)
+
+Nieuwe fout gevonden: een 502 tijdens "USDC-balans opvragen" liet die
+functie stilzwijgend 0.0 teruggeven (bestaand, algemeen foutafhandelings-
+patroon), waarna de bijstort-berekening met deze mogelijk-onjuiste
+data doorging en een INSUFFICIENT_TOKEN_BALANCE-fout gaf.
+
+Gezien _get_swappable_hbar_balance()/_get_swappable_usdc_balance() op
+19 plekken worden gebruikt -- te riskant om het foutafhandelings-
+gedrag daar zelf te wijzigen (bv. een exception laten propageren i.p.v.
+0.0 teruggeven) zonder alle 19 aanroepers te moeten narekenen.
+
+OPGELOST met een gerichte, laag-risico vlag i.p.v. een brede wijziging:
+nieuwe self._balance_fetch_failed_this_cycle, gereset aan het BEGIN van
+elke cyclus, gezet op True in BEIDE balans-functies' except-blokken.
+_deploy_excess_capital_if_available() checkt deze vlag vlak vóór de
+daadwerkelijke storting, en slaat die cyclus over (met een stille
+logregel) als er al een storing was. Andere, bestaande aanroepen van
+deze twee functies blijven ongewijzigd -- deze fix raakt uitsluitend
+de bijstort-functie.
+
+Geverifieerd op syntax EN daadwerkelijke instantiatie.
+
+## Prijs-orakel-manipulatie-check gebouwd (30 aug 2026)
+
+Op aangeleverde feedback: vergelijkt vóór een mint de RELATIEVE
+verandering van de pool's eigen prijs (slot0()) met de RELATIEVE
+verandering van GeckoTerminal's prijs, sinds de vorige meting.
+
+BELANGRIJKE CORRECTIE op het letterlijke voorstel: een DIRECTE, absolute
+vergelijking (zoals voorgesteld: "IF abs(price_slot0 - price_gecko) >
+3%") zou NIET werken, gezien deze twee bronnen op compleet verschillende
+schalen staan (SAUCE-per-HBAR ~50 vs. USD ~0,075 -- zie de eerdere,
+kritieke bevinding van vandaag over SAUCE die geen 1:1 USD-proxy is).
+In plaats daarvan: RELATIEVE verandering sinds de vorige meting
+vergeleken, wat wel schaal-onafhankelijk werkt.
+
+Nieuwe methode: _check_price_oracle_divergence(). Functioneel getest met
+drie scenario's: eerste meting (geen vergelijkingsmateriaal, correct
+True), vergelijkbare beweging in beide bronnen (~2% in beide, correct
+True), en een verdachte afwijking (pool +27%, gecko +0,1%, correct
+False met een duidelijke Telegram-melding).
+
+Gekoppeld aan de TWEE belangrijkste mint-momenten: het vangnet en de
+LP_MODE-heropeningstak in _execute_transition() -- de plekken waar
+daadwerkelijk NIEUW kapitaal wordt ingezet. Bewust NIET gekoppeld aan
+de out-of-range-herbalancering zelf (die wordt al door een GEDETECTEERDE
+prijsbeweging getriggerd, dus een controle daar zou de eigen trigger
+tegenspreken).
+
+Geverifieerd op syntax EN daadwerkelijke instantiatie.
+
+## Evaluatie punt 3 (WHBAR-allowance + gas-buffer): reeds afgedekt
+
+- Allowance-reset-in-reconciliatie: functioneel al gedekt -- de bestaande
+  opstartvolgorde roept check_and_recover_stuck_whbar() (die de
+  allowance intrekt na een unwrap) AL apart aan, direct na
+  _reconcile_lp_position_on_startup(). Geen aparte wijziging nodig.
+- Gas-limit-buffer (30% boven gemeten gemiddelde): GEVERIFIEERD (30 aug
+  2026, na eerder als "waard om te checken" gemarkeerd) -- daadwerkelijk
+  gasverbruik van een bevestigde, succesvolle mint-transactie (positie
+  349 openen) opgevraagd: 716.938 tegen de ingestelde limiet van
+  1.200.000, een marge van 67,4% -- ruim boven de aanbevolen 30%. Geen
+  aanpassing nodig.
+
+## Prijs-orakel-check herzien naar TWAP (30 aug 2026, na aangeleverde feedback)
+
+Terechte kritiek op de eerste versie (cross-source: pool vs.
+GeckoTerminal): zou bij NORMALE, legitieme block-to-block koers-
+bewegingen valse alarmen kunnen geven, vanwege GeckoTerminal's eigen
+indexerings-vertraging (tot enkele minuten) t.o.v. de pool's eigen,
+onmiddellijke tick-updates.
+
+OPGELOST via de voorgestelde TWAP-aanpak (Uniswap V3's ingebouwde
+observe()-orakelfunctie), MET een noodzakelijke, vooraf uitgevoerde
+haalbaarheidscheck: Uniswap V3-pools slaan STANDAARD maar 1 historische
+waarneming op (cardinaliteit=1), wat een TWAP-aanroep onmogelijk zou
+maken tenzij expliciet verhoogd. EMPIRISCH GEVERIFIEERD (via een live
+diagnostisch script): onze pool heeft observationCardinality=1000, ruim
+voldoende voor een 5-minuten-TWAP.
+
+Nieuwe functies:
+- lp_manager.py: get_twap_tick() (nieuw), observe() toegevoegd aan
+  POOL_SLOT0_ABI_MINIMAL. BUG GEVONDEN EN GECORRIGEERD tijdens het
+  bouwen: een handmatige "correctie" voor negatieve-getallen-afronding
+  bleek OVERBODIG en FOUTIEF (Python's // rondt al correct naar beneden
+  af) -- direct empirisch geverifieerd met een test-berekening
+  (-7 // 2 = -4, correct; mijn eigen extra correctie gaf onterecht -5)
+  vóórdat dit gedeployed werd.
+- regime_orchestrator.py: _check_price_oracle_divergence() volledig
+  herschreven naar tick-vs-TWAP (was: relatieve prijsverandering
+  cross-source). Nieuwe drempel PRICE_ORACLE_MAX_TICK_DEVIATION=50
+  ticks (~0,5%, exact zoals voorgesteld).
+
+Tijdens het bouwen: een str_replace liet per ongeluk een deel van de
+OUDE methode-definitie staan naast de nieuwe (twee overlappende
+definities) -- gevonden via een grep-controle vóór het testen, en
+gecorrigeerd met een precieze, regelnummer-gebaseerde verwijdering
+(i.p.v. nogmaals op tekst te matchen).
+
+VOLLEDIG LIVE GETEST tegen de daadwerkelijke pool (niet alleen
+synthetisch): huidige tick en 5-minuten-TWAP-tick kwamen exact overeen
+(0 ticks afwijking) onder normale marktomstandigheden -- bevestigt de
+hele keten (observe()-aanroep, TWAP-berekening, drempel-vergelijking)
+werkt correct zonder valse alarmen.
+
+De oude, cross-source-tracking (_previous_pool_price) is opgeruimd
+(overbodig geworden na de omschakeling naar TWAP).
+
+## BELANGRIJKE CORRECTIE: parallelle sessie, 1 sep 2026
+
+Tussen deze sessie (30 aug) en nu is er in een ANDERE chat (buiten dit
+gesprek) verder gewerkt aan de bot -- vastgesteld en geverifieerd op
+1 sep 2026. Mijn eigen, eerdere aanname dat positie 349 nog actief was,
+bleek verouderd.
+
+GEVERIFIEERDE, ACTUELE STAAT (1 sep 2026, rechtstreeks van de VPS):
+- **Actieve positie is nu 350** (niet 349 -- 349 is gesloten in de andere
+  sessie, om een structureel probleem op te lossen: token 349 was
+  geopend tijdens het LOW-volatiliteitsregime en werd nooit herzien
+  toen het regime naar HIGH verschoof, waardoor de positie permanent te
+  smal bleef).
+- **Nieuwe functionaliteit uit de andere sessie, bevestigd LIVE werkend**:
+  _regime_drift_check() + evaluate_regime_switch_economics() (in
+  lp_manager.py) -- vergelijkt de HUIDIGE positie-breedte met wat GBM nu
+  zou voorstellen, en voert bij een substantiële afwijking (>30%) een
+  kosten-batenanalyse uit vóór een eventuele overstap. Live bevestigd:
+  correct "NIET economisch de moeite waard" gegeven bij een 66%-
+  breedteverschil (netto -72,88 HBAR).
+- **Al ONS eigen werk van 30 augustus blijft ook aanwezig en functioneel**
+  (bevestigd via grep: _check_price_oracle_divergence, get_twap_tick,
+  _balance_fetch_failed_this_cycle, etc. -- 11 vermeldingen) -- BEIDE
+  sessies' werk bestaat naast elkaar zonder geconstateerd conflict.
+- Totale waarde: $101,88 (1 sep), gezond, geen foutmeldingen in de logs.
+
+Zie het volledige overdrachtsdocument (door de gebruiker geplakt, 1 sep)
+voor de complete, chronologische toelichting van de andere sessie --
+niet hier herhaald, maar wel als geldig, bevestigd te beschouwen.
+
+LES VOOR MEZELF: bij een lange onderbreking tussen sessies, ALTIJD eerst
+de daadwerkelijke, actuele staat verifiëren (positie-ID, bestandsdatums,
+logs) vóórdat verder gebouwd wordt -- niet blind uitgaan van de laatst
+bekende staat uit een eerder gesprek.
+
+## Statusrapport uitgebreid met strategie + range-analyse (1 sep 2026)
+
+Op verzoek: dagelijks statusrapport toont nu ook de huidige strategie
+(LP_MODE/BULLISH_REFLEX/BEARISH_REFLEX, via db.get_regime_state()) en
+een gezondheidsanalyse van de actieve positie's range.
+
+Nieuwe range-analyse: toont de prijsrange (via tick_to_price()) en het
+percentage waar de HUIDIGE prijs binnen die range staat (0%=onderkant,
+100%=bovenkant), met een kwalitatief oordeel:
+- <0% of >100%: buiten bereik (verdient geen fees)
+- <15% of >85%: dicht bij de rand (kwetsbaar)
+- overig: gezond gecentreerd
+
+Geverifieerd met de exacte cijfers van eerder vandaag (tick_lower=-6900,
+tick_upper=-6420, prijs=50.34) -- berekende 7,33%, EXACT gelijk aan de
+eerdere, onafhankelijke handmatige berekening die destijds de
+bijstort-balanceringsklem verklaarde.
+
+Geverifieerd op syntax.
+
+## Statusrapport verder uitgebreid: fees, breedte, historische analytics (1 sep 2026)
+
+Op verzoek, drie nieuwe onderdelen aan daily_status_report.py toegevoegd:
+
+### 1. Opgebouwde, nog niet geclaimde fees
+Via een GESIMULEERDE collect()-aanroep (.call(), geen echte transactie)
+met maximale bedragen -- standaardpatroon om te zien wat er nu geclaimd
+zou kunnen worden. collect() toegevoegd aan de lokale ABI in dit bestand
+(bestond al in lp_manager.py, niet hier).
+
+### 2. Breedte van de positie (strategie-indicator)
+Uitgedrukt als percentage rond de huidige prijs -- zelfde soort getal
+als in de bestaande [regime-drift]-logs.
+
+### 3. Historische waarde-analytics (dag/week/maand/jaar)
+NIEUWE database-tabel portfolio_value_history (migratie vereist, zie
+hieronder) -- een rij per keer dat het rapport draait (dus 1x/dag via
+de crontab). NIEUWE functies in postgres_client.py:
+save_portfolio_value_snapshot(), get_portfolio_value_at(days_ago) (zoekt
+de DICHTSTBIJZIJNDE snapshot, met een tolerantie van de helft van de
+gevraagde periode -- voorkomt een misleidende vergelijking als er nog
+niet genoeg historie is, bv. een "30d"-vergelijking op basis van een
+snapshot van 2 dagen oud).
+
+Elke keer dat het rapport draait: slaat EERST de huidige waarde op,
+haalt DAARNA de vergelijkingen op (zodat de eerste run meteen een
+startpunt zet voor toekomstige vergelijkingen). Toont alleen periodes
+waarvoor voldoende, betrouwbare historie beschikbaar is.
+
+db.close() verplaatst van vroeg in het script naar het einde (was
+eerder te vroeg, nu nog nodig voor de snapshot+analytics-aanroepen).
+
+Geverifieerd op syntax (beide bestanden). NIET live getest tegen de
+daadwerkelijke database (vereist eerst de migratie hieronder).
+
+**VEREISTE DATABASE-MIGRATIE** (zelfde patroon als eerder):
+```sql
+CREATE TABLE IF NOT EXISTS portfolio_value_history (
+    id SERIAL PRIMARY KEY,
+    total_value_usd DOUBLE PRECISION NOT NULL,
+    wallet_value_usd DOUBLE PRECISION NOT NULL,
+    position_value_usd DOUBLE PRECISION NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_portfolio_value_history_recorded_at
+    ON portfolio_value_history (recorded_at);
+```
+
+## Inconsistentie gevonden en opgelost: twee breedte-conventies (1 sep 2026)
+
+Bij het draaien van het uitgebreide statusrapport viel op: mijn eigen
+"Breedte"-berekening toonde 61,6%, terwijl de [regime-drift]-log
+(uit de andere sessie) consistent 30,0% toonde voor DEZELFDE positie.
+
+OORZAAK: twee verschillende formules voor hetzelfde begrip.
+- Mijn (oude) formule: VOLLEDIGE breedte t.o.v. de HUIDIGE prijs --
+  (boven-onder)/huidige_prijs
+- _regime_drift_check()'s formule (de gevestigde conventie): HALVE
+  breedte t.o.v. het MIDDEN van de range -- (boven-onder)/(2*midden)
+
+OPGELOST: daily_status_report.py's breedte-berekening aangepast naar
+EXACT dezelfde formule als _regime_drift_check() (opgezocht in de
+daadwerkelijke, live broncode op de VPS). Geverifieerd met de exacte
+cijfers van zonet (prijs_onder=35,2062, prijs_boven=65,3130): nieuwe
+berekening geeft exact 30,0%, overeenkomstig de regime-drift-log.
+
+Les: bij het toevoegen van nieuwe rapportage-functionaliteit naast
+al-bestaande logica van een andere sessie, ALTIJD eerst de exacte,
+gevestigde formules/conventies opzoeken in de broncode zelf, niet
+opnieuw uitvinden op basis van een eigen aanname.
+
+## Live webdashboard gebouwd (1 sep 2026)
+
+Op verzoek: het analytics-mockup omgezet naar een echt, aan de database
+gekoppeld, continu draaiend dashboard op de VPS. GEEN login (op
+uitdrukkelijke wens, "hoeft geen login te hebben nu nog") -- daarom
+BEWUST alleen aan 127.0.0.1 gebonden (bereikbaar via SSH-tunnel/lokaal
+netwerk, NIET direct vanaf het publieke internet), gezien dit financiele
+gegevens toont. Als dit ooit publiek toegankelijk moet worden, is
+wachtwoordbeveiliging dan alsnog nodig -- zie ook de eerdere,
+uitgebreide discussie over multi-user/wallet-koppeling (bewust apart
+gehouden, andere kwestie).
+
+### Nieuwe bestanden
+- bot_data.py (NIEUW): gedeelde data-ophaal-logica, geextraheerd uit
+  daily_status_report.py zodat het Telegram-rapport en het dashboard
+  exact dezelfde, eenmaal-geverifieerde logica gebruiken.
+- dashboard_server.py (NIEUW): FastAPI-app. Route "/" rendert het
+  volledige dashboard (Jinja2), route "/api/history?days=N" levert
+  grafiekdata voor de periode-toggle. Berekent ook de APR-gebaseerde
+  projecties (30/90/180 dagen) en de 24u-waardeverandering.
+- templates/dashboard.html (NIEUW): de eerder goedgekeurde mockup,
+  omgezet naar een Jinja2-sjabloon met echte databinding. Grafiek en
+  valuta-toggle nu volledig functioneel met live/server-aangeleverde
+  data i.p.v. vaste voorbeeldwaarden.
+- postgres_client.py: twee nieuwe functies -- get_portfolio_value_
+  history_since(days) (volledige reeks voor de grafiek, i.t.t. get_
+  portfolio_value_at() dat maar 1 vergelijkingspunt geeft) en
+  get_recent_trades(limit) (voor de transactielijst).
+- requirements.txt: fastapi, uvicorn, jinja2 toegevoegd.
+- docker-compose.yml: nieuwe "dashboard"-service, hergebruikt dezelfde
+  build als de bot (bevat nu ook de nieuwe dependencies), draait
+  uvicorn op poort 8000, ALLEEN aan 127.0.0.1 gebonden.
+
+### Geverifieerd
+- Syntax van alle nieuwe/aangepaste Python-bestanden
+- dashboard_server.py daadwerkelijk GEIMPORTEERD zonder fouten (vangt
+  import-time-problemen die syntax-checks alleen niet zouden zien)
+- Jinja2-sjabloon: geparsed, EN daadwerkelijk GERENDERD met
+  representatieve testdata, EN visueel bevestigd via een screenshot
+  (Playwright) -- inclusief een gevonden en gecorrigeerde bug
+  (ontbrekende "d." prefix bij een variabele, waardoor "testnet" niet
+  verscheen) en een bevestigde, werkende lege-transacties-staat
+- NIET live getest tegen de daadwerkelijke database/VPS (kan niet
+  vanuit de sandbox) -- dat is de eerstvolgende stap bij deployment
+
+### Bekende, kleinere beperkingen (niet blokkerend)
+- EUR-koers is een VASTE, benaderende omrekenfactor (0.923), geen live
+  koers -- GeckoTerminal (onze enige prijsbron) geeft alleen USD.
+  Nodig: een aparte EUR-koers-bron als dit precies moet kloppen.
+- Transactielijst toont alleen swaps uit de trades-tabel, nog geen
+  aparte positie-open/close-gebeurtenissen met hun exacte gaskosten
+  (die worden nu niet los bijgehouden in een tabel) -- mogelijke latere
+  uitbreiding.
+
+## Transactielijst gecorrigeerd: swap-bedrag != kosten (1 sep 2026)
+
+Gevonden na visuele controle van het live dashboard: de transactielijst
+toonde absurd grote "kosten" (bv. -45.477 HBAR) -- dit was het VOLLEDIGE
+swap-bedrag (amount_in), ten onrechte gelabeld als een kostenpost. Een
+swap is geen verlies, alleen een omzetting van het ene token naar het
+andere (de waarde blijft, in een andere vorm).
+
+OPGELOST: de daadwerkelijke gasfee wordt nu apart opgevraagd (via de
+transactie-ontvangstbevestiging, effectiveGasPrice * gasUsed) en getoond
+als de ECHTE kostenpost. Het swap-bedrag zelf staat nu neutraal,
+informatief in de omschrijving ("Swap HBAR -> SAUCE (45.477,29 SAUCE)"),
+niet meer als rode kostenregel.
+
+Efficientie-overweging bewust meegenomen: gebruikt effectiveGasPrice UIT
+de ontvangstbevestiging zelf (standaard EVM-veld) i.p.v. een aparte
+get_transaction()-aanroep (halveert het aantal RPC-aanroepen), EN de
+RPC-client wordt eenmalig aangemaakt vóór de lus i.p.v. per transactie
+(voorheen 30x opnieuw aangemaakt).
+
+Geverifieerd op syntax EN daadwerkelijke, herhaalde import (geen
+import-time-fouten).
+
+## Uurlijkse waarde-snapshots voor de grafiek (1 sep 2026)
+
+Op verzoek: de dashboard-grafiek kreeg voorheen maar 1x per dag een
+nieuw meetpunt (via daily_status_report.py's cron). Nieuw, licht
+script: hourly_snapshot.py -- slaat ELK UUR alleen een snapshot op,
+BEWUST GEEN Telegram-bericht (zou spam geven). Hergebruikt
+fetch_dashboard_data() (exact dezelfde berekening als het Telegram-
+rapport en het dashboard).
+
+Geverifieerd op syntax. Vereist een nieuwe crontab-regel (elk uur):
+0 * * * * cd /root/hbar_bot && docker compose exec -T hbar-bot python3 hourly_snapshot.py >> /root/hbar_bot/logs/hourly_snapshot.log 2>&1
+
+## HBAR-koersgrafiek toegevoegd, boven de waardeverandering (1 sep 2026)
+
+Op verzoek: nieuwe grafiek met de HBAR-koers over dezelfde periode,
+gepositioneerd boven de bestaande waardeverandering-grafiek, met EEN
+gedeelde periode-toggle die beide grafieken tegelijk aanstuurt.
+
+Gebruikt GeckoTerminal's EIGEN, al-bestaande OHLCV-geschiedenis
+(get_historical_ohlcv() in geckoterminal_client.py, ontdekt al aanwezig)
+i.p.v. dit zelf op te slaan -- geeft echte, langere historie (ook van
+vóór we zelf snapshots begonnen op te slaan). Kiest een passend
+candle-interval per gevraagde periode (15-minuten voor 24u, 1-uur voor
+7d, 4-uur voor 30d, dagelijks voor 1j) zodat een jaar aan data niet
+onleesbaar wordt.
+
+Nieuwe endpoint: /api/price-history?days=N. Sjabloon herbouwd met een
+herbruikbare maakLijnGrafiek()-JS-functie (i.p.v. gedupliceerde Chart.js-
+configuratie) -- prijs-grafiek in een onderscheidend blauw (#8AB4F8,
+4 decimalen), waarde-grafiek in het bestaande groen (2 decimalen).
+
+Geverifieerd: Jinja2-syntax, daadwerkelijke rendering, EN visueel
+bevestigd via een screenshot (Playwright) met representatieve testdata.
+
+## Lege prijs-grafiek opgelost: GeckoTerminal-snelheidslimiet (1 sep 2026)
+
+Gevonden via de live logs: GeckoTerminal's publieke API gaf 429 Too
+Many Requests -- de prijs-grafiek roept dit bij elke paginaherlading en
+elke toggle-klik aan, en de snelheidslimiet werd overschreden.
+
+OPGELOST: korte cache (60 seconden, per periode) toegevoegd aan
+_build_price_chart_data(). Bij een storing wordt bovendien de LAATST
+BEKENDE, gecachete data teruggegeven (ook al net verlopen) i.p.v. een
+lege grafiek -- beter licht verouderd dan leeg.
+
+Functioneel getest met een nagemaakte GeckoTerminal-aanroep: bevestigd
+dat een tweede aanroep binnen de cache-periode GEEN nieuwe API-aanroep
+doet (1 daadwerkelijke aanroep i.p.v. 2), en identieke resultaten geeft.
+
+## "Internal Server Error" bij gelijktijdige toegang opgelost (1 sep 2026)
+
+Gevonden: bij het GELIJKTIJDIG openen van het dashboard op twee
+apparaten (mobiel + desktop) crashte de pagina met een onbeveiligde
+429-fout van GeckoTerminal, ditmaal bij get_pool_snapshot() (gebruikt
+voor de actuele prijs in wallet-/positie-berekeningen) -- een andere
+aanroep dan de eerder al beveiligde prijs-grafiek-historie.
+
+OPGELOST OP DE BRON: klasse-brede (niet instantie-eigen) cache
+toegevoegd aan GeckoTerminalClient.get_pool_snapshot() zelf, in
+geckoterminal_client.py -- dit bestand wordt door ZOWEL de bot ALS het
+dashboard ALS het Telegram-rapport gebruikt, en elke aanroeper maakt
+een EIGEN instantie aan, dus een instantie-eigen cache zou niet hebben
+geholpen. Korte levensduur (15s) -- ruim voldoende om gelijktijdige
+aanvragen op te vangen, zonder de bot's eigen, live handelsbeslissingen
+merkbaar te vertragen.
+
+Functioneel getest: TWEE aparte, nieuwe GeckoTerminalClient()-instanties
+(precies het mobiel+desktop-scenario) -- bevestigd 1 daadwerkelijke
+API-aanroep i.p.v. 2, identieke resultaten.
+
+Raakt geckoterminal_client.py, gebruikt door zowel hbar-bot als
+dashboard -- BEIDE containers moeten herbouwd worden.
+
+## Kosten-batenberekening gecorrigeerd: mainnet-basislijn -> live testnet-APR (1 sep 2026)
+
+Gevonden na een gerichte vraag ("waarom kost dit 70 HBAR, dat lijkt me
+veel"): evaluate_regime_switch_economics() gebruikte impliciet
+estimate_fee_apr_for_width()'s DEFAULT, MAINNET-gekalibreerde basislijn
+(1,61% bij 15%-breedte) -- terwijl onze bot op TESTNET draait, waar de
+pool live gemeten 28-33% APR laat zien. Empirisch aangetoond: met de
+mainnet-basislijn wordt zelfs een smalle 11,1%-range geschat op maar
+~2,2% APR; met onze eigen, live APR als basislijn springt dat naar
+~301% -- de mainnet-aanname onderschatte de fee-opbrengst met een
+factor ~40x, wat de kosten-batenanalyse stelselmatig te pessimistisch
+maakte over overstappen naar een smallere, efficiëntere range.
+
+OPGELOST:
+- lp_manager.py: evaluate_regime_switch_economics() uitgebreid met
+  instelbare fee_apr_basislijn/fee_apr_basislijn_breedte-parameters
+  (default: de oorspronkelijke mainnet-waarden, voor achterwaartse
+  compatibiliteit als ooit zonder override aangeroepen).
+- regime_orchestrator.py: _regime_drift_check()'s aanroep geeft nu
+  self._cached_pool_fees_apr (de daadwerkelijke, live-gemeten testnet-
+  APR, elders in dezelfde cyclus al berekend voor de "Live pool-APR"-
+  logregel) door als basislijn, met fee_apr_basislijn_breedte=1.0
+  (benadering: de pool-brede APR representeert ruwweg een zeer brede/
+  volledige-range-positie).
+
+Bewerking rechtstreeks op de VPS uitgevoerd (i.p.v. via GitHub-
+deployment) nadat GitHub's CDN-cache herhaaldelijk een verouderde
+versie van regime_orchestrator.py teruggaf, ook via de specifieke-
+commit-hash-methode -- de op de VPS DRAAIENDE versie werd rechtstreeks
+bevestigd (via een live grep) en vervolgens rechtstreeks, precies
+bewerkt met een Python find-and-replace-script. Geverifieerd:
+1 exacte match gevonden, syntax OK na de wijziging.
+
+lp_manager.py apart nog te deployen (klaar, nog niet naar GitHub gezet
+op het moment van deze notitie).
+
+## Status aan het einde van deze sessie (1 sep 2026, ~16:15)
+
+**Actieve positie**: token 351, breedte 10,5%, range 40,9035-50,4612
+SAUCE/HBAR. Prijs staat op 86,6% in de range (dicht bij de bovenkant).
+
+**Kapitaal**: totaal ~$101, waarvan ~$52 in de positie, de rest
+(575 HBAR + 1.578 SAUCE) los in de wallet -- blijft daar bewust staan
+totdat de veiligheidsklem het toestaat (zie hieronder), OP VERZOEK NIET
+NU handmatig opgelost -- gebruiker wacht dit af en houdt het dashboard
+in de gaten.
+
+**Waarom het overtollige kapitaal nog niet bijgestort wordt**: positie
+351 staat dicht bij de rand van zijn (smalle, 10,5%) range -- bijstorten
+zou een onrealistisch grote swap vereisen (~1.959 HBAR tegen ~575
+beschikbaar). De veiligheidsklem weigert dit terecht en stil (geen
+Telegram-spam, alleen een logregel). Dit lost zichzelf op zodra de
+positie buiten bereik loopt (nieuwe, gecentreerde range) of de
+[regime-drift]-check een grote genoeg afwijking vindt.
+
+**Bevestigd, structurele vervolgstap** (nog niet gebouwd, bewust
+uitgesteld): de tranche-strategie (een aparte, tweede positie voor
+overtollig kapitaal i.p.v. proberen het in een mogelijk-scheve
+bestaande positie te persen) -- zie de eerdere, uitgebreide sectie
+hierover verderop in dit document voor de volledige architectuur-
+overwegingen.
+
+## Belangrijke les uit deze sessie: prijsschaal-consistentie
+
+Vandaag zijn er MEERDERE keren dezelfde kritieke bug gevonden (USD-
+prijs gebruikt waar de pool-eigen SAUCE-per-HBAR-schaal nodig is) in
+VERSCHILLENDE functies, gebouwd op verschillende momenten (soms in
+een andere sessie). Aanbeveling voor een volgende sessie: overweeg een
+grondige, EENMALIGE audit van ALLE plekken die current_price/fresh_price
+gebruiken in regime_orchestrator.py, om te bevestigen dat dit patroon
+nergens anders nog sluimert.
+
+## Technische antwoorden van SaucerSwap (1 sep 2026, relevant voor de tranche-strategie)
+
+Rechtstreeks van SaucerSwap's team, ter voorbereiding op het tranche-werk:
+- mint() ondersteunt WEL volledig eenzijdige posities (amount0Desired=0
+  of amount1Desired=0, tick-range volledig boven/onder de huidige prijs)
+  -- bevestigd met een mainnet-voorbeeld-transactie.
+- Minimale positiegrootte hangt af van de fee-tier's tickSpacing (zie
+  SaucerSwap's fee-tier-documentatie), geen aparte, losse ondergrens.
+- Geen bijzondere zorgen over het doorkruisen van veel niet-
+  geinitialiseerde ticks (gas/revert-risico) bij een rustende,
+  eenzijdige positie.
+- BELANGRIJKE, STRUCTURELE VERKLARING voor de eerder vandaag gevonden
+  eth_estimateGas-onbetrouwbaarheid (Price slippage check/
+  INVALID_NFT_ID bij gesimuleerde mint()-aanroepen, die niet
+  reproduceren bij een echt verzonden transactie): simulatie-
+  transacties kunnen niet met de HTS-precompile-contract (0x167)
+  interacteren, dus kunnen geen echt NFT-serienummer laten minten --
+  geeft een placeholder-serienummer 0 terug, en de daaropvolgende
+  overdracht van serienummer 0 veroorzaakt de INVALID_NFT_ID-fout.
+  AANBEVELING: simulatie-aanroepen (eth_estimateGas/.call() op mint())
+  helemaal vermijden voor dit specifieke type transactie, tenzij er een
+  specifieke reden is om ze wel te gebruiken -- verklaart ook waarom
+  onze eerdere fee-simulatie via collect() WEL werkte (dat mint geen
+  nieuw NFT, dus geen precompile-probleem).
+- Voor het detecteren of een eenzijdige positie volledig "gevuld" is:
+  vergelijk de HUIDIGE tick met de min/max-ticks van de positie -- als
+  de huidige tick boven/onder BEIDE grenzen ligt, is de positie er
+  volledig doorheen bewogen.
+- SaucerSwap's ontwikkelaars-documentatie is voor mij volledig
+  leesbaar/doorzoekbaar, met name de developer-pagina's -- nuttig voor
+  toekomstig, gedetailleerder opzoekwerk.
+
+## Totaaloverzicht (stortingen + netto-resultaat) op het dashboard (1 sep 2026)
+
+Op verzoek: "totaal aantal fees en de bijstortingen" onderaan het
+dashboard. Na grondig, iteratief mirror-node-onderzoek (zie hieronder)
+gekozen voor: totale stortingen (nauwkeurig) + netto-resultaat (huidige
+waarde min stortingen), NIET een apart "totale fees"-getal -- dat bleek
+niet betrouwbaar te reconstrueren zonder per gesloten positie (349,
+350) de exacte, oorspronkelijke inleg te kennen (principaal en fees
+komen in dezelfde overdracht terug bij het sluiten van een positie).
+
+### get_total_deposits_hbar() (bot_data.py, NIEUW) -- twee iteraties nodig
+Eerste versie (aannames over de mirror-node-datastructuur, niet vanuit
+de sandbox te testen) gaf 0,0 HBAR terug -- FOUT: account.id-parameter
+accepteert geen EVM-adres direct, en er bestaat geen apart
+"payer_account_id"-veld.
+
+Tweede versie (na live debuggen tegen de daadwerkelijke respons): eerst
+het EVM-adres omzetten naar het Hedera-eigen 0.0.X-formaat via
+/api/v1/accounts/{evm_adres}, en de initiator afleiden uit transaction_id
+zelf (het deel vóór het eerste streepje). Gaf 7420,38 HBAR -- TE HOOG,
+niet aannemelijk gegeven de huidige totale waarde van ~$101.
+
+Derde, definitieve versie: bij het daadwerkelijk oplijsten van ELKE
+meegetelde transactie (op verzoek) bleek het overgrote deel afkomstig
+van initiator 0.0.7314364 -- Hedera's EIGEN JSON-RPC-relay-account, dat
+ONZE EIGEN swap-/positie-transacties namens ons indient (bv. een
+refundETH()-teruggave na een swap toont DIT account als "initiator",
+niet onszelf). Expliciet uitgesloten naast ons eigen account. Resultaat:
+2127,9987 HBAR -- BEVESTIGD DOOR DE GEBRUIKER als aannemelijk, komt
+overeen met 3x testnet-faucet (0.0.2, 3x10 HBAR) + 3x eigen, handmatige
+stortingen vanaf een aparte wallet (0.0.10230686, 999+999+99,9987 HBAR).
+
+AANNAME/BEPERKING: 0.0.7314364 is een TESTNET-specifiek relay-account-
+ID -- bij een mainnet-migratie moet dit opnieuw geverifieerd worden (kan
+een ander account-ID zijn).
+
+### Dashboard-integratie
+- bot_data.py: fetch_dashboard_data() geeft nu ook "wallet_address"
+  terug (nodig voor get_total_deposits_hbar(), voorkomt een aparte,
+  overbodige RPC-client-aanmaak in dashboard_server.py).
+- dashboard_server.py: berekent total_deposits_hbar en net_result_usd
+  (huidige totale waarde min de dollarwaarde van de stortingen).
+- templates/dashboard.html: nieuw paneel "Totaaloverzicht (sinds
+  start)", met een nette lege-staat ("Niet beschikbaar") als de mirror-
+  node-aanroep zou mislukken, en correcte kleur (rood bij verlies,
+  groen bij winst) voor het netto-resultaat.
+
+Geverifieerd: Jinja2-syntax, EN daadwerkelijke rendering van alle DRIE
+scenario's (verlies, winst, niet-beschikbaar) met representatieve data.
+NOG NIET live getest tegen de daadwerkelijke, draaiende dashboard-server
+(vereist deployment).
+
+## Fee-onderprestatie-trigger (2 sep 2026, op verzoek)
+
+Gevonden: de bestaande _regime_drift_check() reageert uitsluitend op
+sentiment/volatiliteit-gebaseerde breedte-afwijkingen -- een positie die
+dicht bij de rand van zijn range staat EN structureel geen fees verdient
+(waarschijnlijk omdat het actuele handelsvolume elders in de pool
+plaatsvindt, buiten de smalle band, ook al is de POOL zelf wel actief)
+werd hierdoor NOOIT opgemerkt als de GBM-voorgestelde breedte toevallig
+niet noemenswaardig verschilde van de huidige.
+
+NIEUW: _fee_underperformance_check() in regime_orchestrator.py -- als
+een positie dicht bij de rand staat (<15% of >85%, zelfde drempel als
+elders) EN de opgebouwde fees al fee_stagnation_uren_drempel uur (env
+var FEE_STAGNATION_UREN_DREMPEL, default 4.0 -- AANNAME, niet empirisch
+geijkt) niet meetbaar gegroeid zijn, wordt de positie proactief
+hercentreerd op de HUIDIGE prijs. Geen aparte kosten-batenanalyse hier
+(anders dan _regime_drift_check): bij structureel nul fee-inkomsten is
+er per definitie niets te verliezen aan fee-opbrengst.
+
+REFACTOR: sluit+balanceer+heropen-logica geextraheerd uit
+_regime_drift_check() naar een gedeelde methode
+_sluit_en_heropen_positie() (reden_label-parameter voor duidelijke
+foutmeldingen per aanroeper) -- voorkomt gedupliceerde logica op
+meerdere plekken, een probleem dat vandaag al meerdere keren zorgde
+voor een fix die maar op een van de twee plekken landde.
+
+Geverifieerd: syntax, instantiatie, EN vier functionele scenario's via
+mocking (niet-dicht-bij-rand -> reset; fees groeien -> geen actie;
+eerste stagnatie -> klok gestart, geen actie; langdurige stagnatie ->
+actie correct getriggerd). NOG NIET live getest (vereist een
+daadwerkelijk stagnerende positie, of een verkorte drempel voor een
+snelle test).
+
+### TE HERIJKEN VOOR MAINNET-LIVEGANG (op verzoek genoteerd, 2 sep 2026)
+
+Het onderliggende principe (een positie kan dicht bij de rand staan EN
+naast het echte handelsvolume zitten, ook als de POOL zelf wel actief
+is) blijft ook op een drukkere mainnet-pool relevant -- waarschijnlijk
+zelfs belangrijker, met echt kapitaal op het spel. Maar de HUIDIGE
+drempelwaarden zijn expliciet gegokt voor de huidige, rustige
+testnet-situatie, niet empirisch onderbouwd, en moeten voor mainnet
+opnieuw bekeken worden:
+
+- `fee_stagnation_uren_drempel` (env var FEE_STAGNATION_UREN_DREMPEL,
+  huidige default 4.0 uur): op een veel actievere mainnet-pool zou
+  "geen fee-groei" waarschijnlijk zeldzamer voorkomen (meer volume
+  raakt meer prijspunten) -- deze drempel kan wellicht korter, of moet
+  anders gekalibreerd worden om vals-positieven te voorkomen bij
+  normale, korte stiltes.
+- `FEE_GROEI_DREMPEL_HBAR` (huidige, vast-gecodeerde waarde 0.001 HBAR
+  in _fee_underperformance_check()): expliciet gebaseerd op "ongeveer
+  de orde van een testnet-gasfee". Op mainnet, met betekenisvollere
+  bedragen, zou dit beter uitgedrukt kunnen worden als een PERCENTAGE
+  van de positiewaarde, i.p.v. een vast HBAR-bedrag.
+
+AANBEVELING: vóór mainnet-livegang empirisch herijken -- bijvoorbeeld
+door te kijken hoe vaak en hoe lang deze check op mainnet-achtige
+volumes daadwerkelijk zou aanslaan (vergelijkbaar met hoe de fee-APR-
+basislijn vandaag al eens gecorrigeerd is van een verouderde mainnet-
+aanname naar de live, werkelijk-gemeten APR).
+
+## Git structureel gekoppeld aan de VPS (2 sep 2026)
+
+Root cause voor herhaalde synchronisatieproblemen vandaag (GitHub-
+bestanden bewerken die dan weer via wget opgehaald moesten worden, met
+herhaaldelijke CDN-cache-problemen): geen echte git-koppeling, alleen
+losse wget-downloads. OPGELOST: SSH-sleutel gegenereerd op de VPS
+(~/.ssh/github_hbar_bot), toegevoegd aan GitHub, git geinitialiseerd in
+~/hbar_bot met de HUIDIGE, daadwerkelijk-draaiende VPS-staat als
+uitgangspunt (127 bestanden, inclusief eerdere, rechtstreeks-op-de-VPS
+gemaakte fixes die nooit waren teruggezet naar GitHub), en geforceerd
+gepusht naar GitHub main (GitHub was verouderd t.o.v. de VPS).
+
+Vanaf nu: `git pull`/`git add . && git commit && git push` rechtstreeks
+op de VPS, i.p.v. bestanden via de browser naar GitHub kopieren en dan
+met wget (+nocache-trucs, soms zelfs commit-hash-methode nodig) weer
+ophalen.
