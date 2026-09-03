@@ -2230,11 +2230,41 @@ class RegimeOrchestrator:
         # zelf blijft bestaan in gbm_range_model.py (niet verwijderd, voor
         # het geval dit ooit heroverwogen wordt), alleen deze aanroep hier.
 
+        # BUGFIX (3 sep 2026, KRITIEK, gevonden na een gemiste terugval):
+        # zowel de trailing-stop hieronder als de nieuwe markt-bevestigde-
+        # terugkeer-check gebruikten voorheen current_price (GeckoTerminal),
+        # maar GeckoTerminal's data voor DEZE testnet-pool bleek voor
+        # langere tijd (30+ minuten) niet te verversen, ook al bewoog de
+        # markt daadwerkelijk (bevestigd: rechtstreeks bij GeckoTerminal
+        # nagevraagd, gaf nog steeds exact dezelfde, verouderde prijs
+        # terug). fresh_price (rechtstreeks van de pool zelf, on-chain)
+        # wordt nu gebruikt voor BEIDE checks -- ongevoelig voor
+        # GeckoTerminal's eigen verversings-cadans.
+        if self.current_regime in (Regime.BULLISH_REFLEX, Regime.BEARISH_REFLEX) and self.lp_manager:
+            try:
+                from lp_manager import get_live_pool_price
+                fresh_reflex_price = get_live_pool_price(
+                    self.rpc_client, self.lp_manager.config.factory_address,
+                    self.lp_manager.config.token0, self.lp_manager.config.token1,
+                    self.lp_manager.config.fee_tier,
+                    self._hbar_decimals, self._usdc_decimals,
+                )
+                # fresh_reflex_price staat in de POOL-EIGEN, interne
+                # SAUCE-per-HBAR-schaal, niet USD -- voor de trailing-stop/
+                # markt-bevestigde-terugkeer-checks (die alleen relatieve
+                # bewegingen t.o.v. een eerder vastgelegd extreem meten,
+                # geen USD-bedragen) is dat prima, zolang het maar
+                # consistent dezelfde schaal is doorheen een hele episode.
+            except Exception:
+                fresh_reflex_price = current_price  # val terug, beter dan crashen
+        else:
+            fresh_reflex_price = current_price
+
         if self.current_regime == Regime.BULLISH_REFLEX and self.trailing_tracker:
-            stop_price = self.trailing_tracker.update(current_price)
-            if current_price <= stop_price:
+            stop_price = self.trailing_tracker.update(fresh_reflex_price)
+            if fresh_reflex_price <= stop_price:
                 print(f"[regime] Trailing-stop getriggerd tijdens BULLISH_REFLEX "
-                      f"(prijs={current_price:.5f} <= stop={stop_price:.5f}) -- winst nemen.")
+                      f"(prijs={fresh_reflex_price:.5f} <= stop={stop_price:.5f}) -- winst nemen.")
                 target_regime = Regime.LP_MODE
                 is_profit_take = True
 
@@ -2249,7 +2279,7 @@ class RegimeOrchestrator:
         # terug naar de pool.
         if (target_regime == self.current_regime
                 and self.current_regime in (Regime.BULLISH_REFLEX, Regime.BEARISH_REFLEX)):
-            markt_bevestigd, reden = self._check_market_confirmed_reflex_exit(current_price)
+            markt_bevestigd, reden = self._check_market_confirmed_reflex_exit(fresh_reflex_price)
             if markt_bevestigd:
                 print(f"[regime] Markt-bevestigde terugkeer naar LP_MODE tijdens "
                       f"{self.current_regime.value}: {reden}.")
