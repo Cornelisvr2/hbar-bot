@@ -767,6 +767,28 @@ class RegimeOrchestrator:
         if seconds_since_last_lp_rebalance < self.lp_rebalance_cooldown_seconds:
             return
 
+        # BUGFIX (3 sep 2026, gevonden na een verdachte -427.2%-melding
+        # in productie): deze functie gebruikte current_price (GeckoTerminal-
+        # USD, bv. 0.077) i.p.v. de POOL-EIGEN, interne SAUCE-per-HBAR-
+        # schaal (bv. ~49) voor de in_range_pct-berekening -- EXACT
+        # hetzelfde patroon als de kritieke bug die eerder al in
+        # _regime_drift_check() werd gevonden en opgelost, hier per
+        # ongeluk herhaald in deze nieuwere functie. fresh_price wordt
+        # nu VROEG opgehaald en voortaan overal in deze functie gebruikt
+        # (was voorheen pas laat, alleen vlak vóór de GBM-berekening,
+        # opgehaald).
+        try:
+            from lp_manager import get_live_pool_price
+            fresh_price = get_live_pool_price(
+                self.rpc_client, self.lp_manager.config.factory_address,
+                self.lp_manager.config.token0, self.lp_manager.config.token1,
+                self.lp_manager.config.fee_tier,
+                self._hbar_decimals, self._usdc_decimals,
+            )
+        except Exception as e:
+            telegram_notify.report_error("fee_underperformance_check: pool-prijs opvragen", str(e))
+            return
+
         from lp_manager import tick_to_price
         tick_lower = self.lp_manager.state.tick_lower
         tick_upper = self.lp_manager.state.tick_upper
@@ -774,7 +796,7 @@ class RegimeOrchestrator:
         prijs_upper = tick_to_price(tick_upper, self._hbar_decimals, self._usdc_decimals)
         if prijs_upper <= prijs_lower:
             return  # defensief, voorkomt een deling-door-nul verderop
-        in_range_pct = (current_price - prijs_lower) / (prijs_upper - prijs_lower) * 100
+        in_range_pct = (fresh_price - prijs_lower) / (prijs_upper - prijs_lower) * 100
 
         if 15 <= in_range_pct <= 85:
             self._fee_stagnant_since = None  # niet dicht bij de rand -- niet van toepassing
@@ -829,18 +851,6 @@ class RegimeOrchestrator:
             1.0, combined_volatility_sigma_now * self._volatility_calibration_factor
         )
         combined_score_now = apply_regime_bias(combined_score_now, self._cached_macro_regime)
-
-        try:
-            from lp_manager import get_live_pool_price
-            fresh_price = get_live_pool_price(
-                self.rpc_client, self.lp_manager.config.factory_address,
-                self.lp_manager.config.token0, self.lp_manager.config.token1,
-                self.lp_manager.config.fee_tier,
-                self._hbar_decimals, self._usdc_decimals,
-            )
-        except Exception as e:
-            telegram_notify.report_error("fee_underperformance_check: pool-prijs opvragen", str(e))
-            return
 
         nieuwe_tick_lower, nieuwe_tick_upper = self.lp_manager.compute_range_via_gbm(
             fresh_price, combined_score_now, combined_volatility_sigma_now,
