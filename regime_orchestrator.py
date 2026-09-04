@@ -2347,6 +2347,22 @@ class RegimeOrchestrator:
         transition_succeeded = await self._execute_transition(target_regime, current_price, signal_id)
         self._last_transition_at = time.time()
 
+        # BUGFIX (4 sep 2026, KRITIEK, gevonden na een spam-lus van
+        # identieke Telegram-berichten, elke cyclus): als een markt-
+        # bevestigde terugkeer WEL gedetecteerd wordt maar de overstap
+        # zelf mislukt (bv. de balanceringsklem), bleef _reflex_exit_
+        # pending_since ongewijzigd staan -- de ONDERLIGGENDE, ruwe
+        # conditie (bv. "30 min zijwaarts") blijft dan gewoon waar, dus
+        # de VOLGENDE cyclus werd de bevestiging METEEN weer als "net
+        # bevestigd" gezien, en stuurde opnieuw dezelfde melding. Reset
+        # nu expliciet bij een mislukte poging -- de VOLGENDE keer moet
+        # de conditie opnieuw de volledige bevestigingsperiode
+        # ononderbroken gelden, wat vanzelf ook de meldingsfrequentie
+        # begrenst (net als de balanceringsklem-cooldown elders).
+        if is_market_confirmed_reentry and not transition_succeeded:
+            self._reflex_exit_pending_since = None
+            self._reflex_exit_pending_reason = ""
+
         if transition_succeeded:
             # Reflex-episode-logging (27 aug 2026): exit loggen als we een
             # reflex-regime VERLATEN, entry loggen als we er een INSTAPPEN.
