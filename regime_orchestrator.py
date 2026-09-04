@@ -622,7 +622,7 @@ class RegimeOrchestrator:
                 self.rpc_client, self.lp_manager.config.factory_address,
                 self.lp_manager.config.token0, self.lp_manager.config.token1,
                 self.lp_manager.config.fee_tier,
-                self._hbar_decimals, self._usdc_decimals,
+                self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
             )
         except Exception as e:
             telegram_notify.report_error(
@@ -834,7 +834,7 @@ class RegimeOrchestrator:
                 self.rpc_client, self.lp_manager.config.factory_address,
                 self.lp_manager.config.token0, self.lp_manager.config.token1,
                 self.lp_manager.config.fee_tier,
-                self._hbar_decimals, self._usdc_decimals,
+                self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
             )
         except Exception as e:
             telegram_notify.report_error("fee_underperformance_check: pool-prijs opvragen", str(e))
@@ -957,7 +957,7 @@ class RegimeOrchestrator:
                 self.rpc_client, self.lp_manager.config.factory_address,
                 self.lp_manager.config.token0, self.lp_manager.config.token1,
                 self.lp_manager.config.fee_tier,
-                self._hbar_decimals, self._usdc_decimals,
+                self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
             )
         except Exception:
             fresh_price = current_price
@@ -1056,7 +1056,7 @@ class RegimeOrchestrator:
                 self.rpc_client, self.lp_manager.config.factory_address,
                 self.lp_manager.config.token0, self.lp_manager.config.token1,
                 self.lp_manager.config.fee_tier,
-                self._hbar_decimals, self._usdc_decimals,
+                self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
             )
         except Exception:
             live_price = current_price  # val terug op de meegegeven prijs als ophalen faalt
@@ -1167,7 +1167,7 @@ class RegimeOrchestrator:
                 self.rpc_client, self.lp_manager.config.factory_address,
                 self.lp_manager.config.token0, self.lp_manager.config.token1,
                 self.lp_manager.config.fee_tier,
-                self._hbar_decimals, self._usdc_decimals,
+                self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
             )
         except Exception:
             fresh_price = current_price
@@ -2074,7 +2074,7 @@ class RegimeOrchestrator:
                         self.rpc_client, self.lp_manager.config.factory_address,
                         self.lp_manager.config.token0, self.lp_manager.config.token1,
                         self.lp_manager.config.fee_tier,
-                        self._hbar_decimals, self._usdc_decimals,
+                        self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
                     )
                 except Exception:
                     fresh_price = current_price
@@ -2135,7 +2135,7 @@ class RegimeOrchestrator:
                             self.rpc_client, self.lp_manager.config.factory_address,
                             self.lp_manager.config.token0, self.lp_manager.config.token1,
                             self.lp_manager.config.fee_tier,
-                            self._hbar_decimals, self._usdc_decimals,
+                            self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
                         )
                     except Exception:
                         fresh_price = current_price  # val terug op de oude prijs als ophalen faalt
@@ -2250,7 +2250,7 @@ class RegimeOrchestrator:
                     self.rpc_client, self.lp_manager.config.factory_address,
                     self.lp_manager.config.token0, self.lp_manager.config.token1,
                     self.lp_manager.config.fee_tier,
-                    self._hbar_decimals, self._usdc_decimals,
+                    self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
                 )
                 # fresh_reflex_price staat in de POOL-EIGEN, interne
                 # SAUCE-per-HBAR-schaal, niet USD -- voor de trailing-stop/
@@ -2720,7 +2720,7 @@ class RegimeOrchestrator:
                     self.rpc_client, self.lp_manager.config.factory_address,
                     self.lp_manager.config.token0, self.lp_manager.config.token1,
                     self.lp_manager.config.fee_tier,
-                    self._hbar_decimals, self._usdc_decimals,
+                    self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
                 ) if self.lp_manager else current_price
             except Exception:
                 fresh_price = current_price
@@ -2806,7 +2806,7 @@ class RegimeOrchestrator:
                         self.rpc_client, self.lp_manager.config.factory_address,
                         self.lp_manager.config.token0, self.lp_manager.config.token1,
                         self.lp_manager.config.fee_tier,
-                        self._hbar_decimals, self._usdc_decimals,
+                        self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
                     )
                 except Exception:
                     pass  # val terug op de bestaande current_price als ophalen faalt
