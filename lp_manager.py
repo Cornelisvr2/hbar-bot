@@ -958,7 +958,8 @@ class LpManager:
                                 volatility_sigma: float, historical_hourly_volatility: float,
                                 horizon_hours: float = 4.0,
                                 confidence_level: float = 0.80,
-                                macro_regime: str = "sideways") -> tuple[int, int]:
+                                macro_regime: str = "sideways",
+                                apply_fat_tail_buffer: bool = True) -> tuple[int, int]:
         """
         Vervangt compute_range()'s discrete LOW/NORMAL/HIGH-indeling door
         een doorlopend berekende range, via Geometric Brownian Motion
@@ -980,6 +981,11 @@ class LpManager:
         macro_regime: "bull"/"bear"/"sideways" (28 aug 2026) -- geeft een
             AANVULLENDE, macro-niveau drift-versterking bovenop de
             nieuws-niveau-asymmetrie, zie gbm_range_model.py.
+        apply_fat_tail_buffer: standaard True (ongewijzigd gedrag). Zie
+            compute_gbm_confidence_interval() in gbm_range_model.py voor
+            de volledige toelichting -- op False zetten voor een
+            symmetrische range, specifiek bedoeld voor het heropenen na
+            een reflex-uitstap.
         """
         from gbm_range_model import compute_gbm_confidence_interval
 
@@ -991,6 +997,7 @@ class LpManager:
             horizon_hours=horizon_hours,
             confidence_level=confidence_level,
             macro_regime=macro_regime,
+            apply_fat_tail_buffer=apply_fat_tail_buffer,
         )
 
         tick_lower = price_to_tick(result.lower_price, self.config.token0_decimals, self.config.token1_decimals)
