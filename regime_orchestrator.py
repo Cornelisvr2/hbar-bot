@@ -771,7 +771,6 @@ class RegimeOrchestrator:
                 self.lp_manager.state.token_id,
                 self.lp_manager.state.tick_lower,
                 self.lp_manager.state.tick_upper,
-                regime_at_creation=self._cached_volatility_regime.value,  # informatief, niet meer beslissend
             )
             self._last_lp_rebalance_at = time.time()
             telegram_notify.send_telegram_message(
@@ -1231,7 +1230,6 @@ class RegimeOrchestrator:
                 self.lp_manager.state.token_id,
                 self.lp_manager.state.tick_lower,
                 self.lp_manager.state.tick_upper,
-                regime_at_creation=self._cached_volatility_regime.value,
             )
             telegram_notify.send_telegram_message(
                 f"LP-positie geherbalanceerd: {hbar_raw/(10**self._hbar_decimals):.4f} HBAR "
@@ -2189,7 +2187,6 @@ class RegimeOrchestrator:
                             self.lp_manager.state.token_id,
                             self.lp_manager.state.tick_lower,
                             self.lp_manager.state.tick_upper,
-                            regime_at_creation=self._cached_volatility_regime.value,
                         )
                         telegram_notify.send_telegram_message(
                             f"LP-positie geopend (vangnet, na herbalancering, "
@@ -2817,7 +2814,6 @@ class RegimeOrchestrator:
                         self.lp_manager.state.token_id,
                         self.lp_manager.state.tick_lower,
                         self.lp_manager.state.tick_upper,
-                        regime_at_creation=self._cached_volatility_regime.value,
                     )
                     self.trailing_tracker = None
                     telegram_notify.send_telegram_message(
