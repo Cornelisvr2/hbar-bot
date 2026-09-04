@@ -2719,11 +2719,22 @@ class RegimeOrchestrator:
                 1.0, combined_volatility_sigma_now * self._volatility_calibration_factor
             )
             combined_score_now = apply_regime_bias(combined_score_now, self._cached_macro_regime)
+            # apply_fat_tail_buffer=False (4 sep 2026, op verzoek): dit
+            # codepad is UITSLUITEND het heropenen NA een reflex-uitstap
+            # (target_regime == LP_MODE wordt alleen hier bereikt vanuit
+            # BULLISH_REFLEX/BEARISH_REFLEX) -- kapitaal staat dan al 100%
+            # in een enkel token. De normale, fat-tail-scheve range kan
+            # dan een onhaalbare heropenings-verhouding vereisen (empirisch
+            # gevonden: 8145 HBAR nodig, 2279 beschikbaar). Een symmetrische
+            # range is hier direct haalbaar. Andere aanroepers (normale
+            # herbalancering, regime-drift, fee-onderprestatie) blijven
+            # ongewijzigd de fat-tail-bescherming gebruiken.
             tick_lower, tick_upper = self.lp_manager.compute_range_via_gbm(
                 fresh_price, combined_score_now, combined_volatility_sigma_now,
                 self._cached_hourly_volatility,
                 macro_regime=self._cached_macro_regime,
                 confidence_level=self._determine_gbm_confidence_level(combined_score_now),
+                apply_fat_tail_buffer=False,
             ) if self.lp_manager else (0, 0)
 
             if self.lp_manager:
