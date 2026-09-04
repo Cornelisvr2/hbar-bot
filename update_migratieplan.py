@@ -1,4 +1,4 @@
-with open("/root/hbar_bot/MAINNET_MIGRATIEPLAN.md", "r") as f:
+with open("/root/hbar_bot/mainnet_migratieplan.md", "r") as f:
     inhoud = f.read()
 
 nieuw_deel = """
@@ -36,6 +36,6 @@ nieuw_deel = """
   mainnet-data, net als de bestaande, nooit-geijkte aannames elders in
   het systeem."""
 
-with open("/root/hbar_bot/MAINNET_MIGRATIEPLAN.md", "w") as f:
+with open("/root/hbar_bot/mainnet_migratieplan.md", "w") as f:
     f.write(inhoud + nieuw_deel)
-print("Toegevoegd aan MAINNET_MIGRATIEPLAN.md.")
+print("Toegevoegd aan mainnet_migratieplan.md.")
