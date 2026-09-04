@@ -923,7 +923,7 @@ class RegimeOrchestrator:
             self._fee_stagnant_since = None
             self._last_significant_fee_hbar = 0.0
 
-    async def _deploy_excess_capital_if_available(self, current_price: float):
+    async def _deploy_excess_capital_if_available(self, current_price: float, bypass_cooldown: bool = False):
         """
         Stort automatisch overtollig wallet-kapitaal bij in de bestaande
         LP-positie (30 aug 2026, op verzoek) -- zodra er kapitaal
@@ -941,7 +941,7 @@ class RegimeOrchestrator:
             return
         if not self.lp_manager or not self.lp_manager.state.is_open:
             return
-        if (time.time() - self._last_capital_deploy_at) < self.deploy_capital_cooldown_seconds:
+        if (not bypass_cooldown and (time.time() - self._last_capital_deploy_at) < self.deploy_capital_cooldown_seconds):
             return
 
         excess_hbar = self._get_swappable_hbar_balance(current_price)
@@ -2420,7 +2420,25 @@ class RegimeOrchestrator:
     # gas-buffer, maar als algemene operationele veiligheidsreserve die
     # de bot bij ELKE toekomstige positie-opening/herbalancering
     # aanhoudt, niet alleen voor transactiekosten.
-    MIN_GAS_RESERVE_HBAR = 50.0
+    # HERZIEN (4 sep 2026, EMPIRISCH BEVESTIGD na twee losse, live
+    # "Insufficient funds for transfer"-fouten -- de eerste keer werd dit
+    # ten onrechte toegeschreven aan een verouderde balans-cache
+    # (teruggedraaid op verzoek); die fix loste het echter NIET op bij
+    # een tweede, herhaalde test, wat de ECHTE oorzaak blootlegde:
+    #
+    # Dit is GEEN kwestie van "de reserve gebruiken voor de pool-
+    # inhoud" (die zorg blijft terecht en onveranderd) -- het gaat om
+    # wat het NETWERK vooraf blokkeert als garantie (gas_limit x
+    # max_fee_per_gas, bij open_position()'s gas_limit_override van
+    # 1.200.000) VOORDAT een transactie uberhaupt wordt uitgevoerd, ook
+    # al wordt er uiteindelijk maar een fractie daarvan daadwerkelijk in
+    # rekening gebracht. 50 HBAR bleek deze gereserveerde marge niet
+    # altijd te dekken. Verdubbeld naar 100 HBAR, AANNAME, geen
+    # empirisch exact geijkte waarde -- de reserve zelf wordt nog steeds
+    # NOOIT bewust ingezet als positie-kapitaal (dat principe blijft
+    # onveranderd), dit vergroot alleen de marge voor wat het netwerk
+    # vooraf kan blokkeren.
+    MIN_GAS_RESERVE_HBAR = 100.0
 
     def _get_swappable_hbar_balance(self, current_price: float) -> float:
         """
@@ -2818,7 +2836,16 @@ class RegimeOrchestrator:
                 try:
                     self.lp_manager.open_position(
                         hbar_raw, usdc_raw, current_price,
-                        slippage_tolerance=0.15,
+                        # Verruimd naar 30% (4 sep 2026, op verzoek) --
+                        # deze dunne testnet-pool blijkt door ONZE EIGEN,
+                        # relatief grote transacties (bevestigd: onze
+                        # enkele swap was al een aanzienlijk deel van het
+                        # TOTALE 24u-volume) meerdere procenten prijsimpact
+                        # te ondervinden binnen een enkele herbalancerings-
+                        # reeks -- op mainnet, met veel diepere liquiditeit,
+                        # zou dezelfde transactiegrootte een verwaarloosbare
+                        # impact hebben. Puur een testnet-aanpassing.
+                        slippage_tolerance=0.30,
                         gas_limit_override=1_200_000,
                         precomputed_tick_range=(tick_lower, tick_upper),
                     )
@@ -2832,6 +2859,15 @@ class RegimeOrchestrator:
                         f"Regime-schakelaar: terug naar LP_MODE -- {hbar_raw/(10**self._hbar_decimals):.4f} HBAR "
                         f"+ {usdc_raw/(10**self._usdc_decimals):.2f} USDC in de pool."
                     )
+                    # NIEUW (4 sep 2026, op verzoek): direct na een
+                    # geslaagde heropening proberen om eventueel
+                    # restkapitaal (door balancerings-onnauwkeurigheid
+                    # of een kleine prijsbeweging tussen berekening en
+                    # daadwerkelijke mint) METEEN bij te storten, zonder
+                    # op de normale cooldown te wachten -- voorkomt dat
+                    # het te lang los blijft staan terwijl de prijs
+                    # intussen verder wegdrijft.
+                    await self._deploy_excess_capital_if_available(current_price, bypass_cooldown=True)
                 except Exception as e:
                     all_succeeded = False
                     telegram_notify.report_error(
