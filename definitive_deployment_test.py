@@ -76,20 +76,34 @@ async def main():
     print("\n" + "=" * 60)
     print("STAP 4: Positie openen (echte mint)")
     print("=" * 60)
+    # Cache expliciet ongeldig maken (4 sep 2026, zelfde fix als eerder
+    # in de productie-code, hier ook nodig omdat dit script de
+    # balans-functie los aanroept) -- voorkomt een verouderde meting
+    # die de gaskosten van de zojuist gedane balancerings-swap nog niet
+    # heeft verwerkt.
+    orchestrator._hbar_balance_cache = None
     hbar_balance = orchestrator._get_swappable_hbar_balance(fresh_price)
     usdc_balance = orchestrator._get_swappable_usdc_balance()
     hbar_raw_final = int(hbar_balance * (10 ** 8))
     usdc_raw_final = int(usdc_balance * (10 ** 6))
     print(f"Poging met: {hbar_raw_final/(10**8):.4f} HBAR, {usdc_raw_final/(10**6):.4f} SAUCE")
 
-    lp.open_position(
-        hbar_raw_final, usdc_raw_final, fresh_price, slippage_tolerance=0.15,
-        gas_limit_override=1_200_000,
-        precomputed_tick_range=(tick_lower, tick_upper),
-    )
-    print(f"GELUKT! Nieuwe positie: token_id={lp.state.token_id}")
-    await db.save_active_lp_position(lp.state.token_id, lp.state.tick_lower, lp.state.tick_upper)
-    print("Opgeslagen in de database.")
+    import requests as requests_module
+    try:
+        lp.open_position(
+            hbar_raw_final, usdc_raw_final, fresh_price, slippage_tolerance=0.15,
+            gas_limit_override=1_200_000,
+            precomputed_tick_range=(tick_lower, tick_upper),
+        )
+        print(f"GELUKT! Nieuwe positie: token_id={lp.state.token_id}")
+        await db.save_active_lp_position(lp.state.token_id, lp.state.tick_lower, lp.state.tick_upper)
+        print("Opgeslagen in de database.")
+    except requests_module.exceptions.HTTPError as e:
+        print(f"\n=== VOLLEDIGE FOUTMELDING VAN DE RPC-NODE ===")
+        print(f"Statuscode: {e.response.status_code}")
+        print(f"Respons-body: {e.response.text}")
+        await db.close()
+        return
 
     print("\n" + "=" * 60)
     print("STAP 5: VERIFICATIE -- hoeveel HBAR bleef onbenut over?")
