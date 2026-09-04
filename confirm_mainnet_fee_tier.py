@@ -7,7 +7,7 @@ MAINNET_POOL_ADDRESS = "0xc5b707348da504e9be1bd4e21525459830e7b11d"
 w3 = Web3(Web3.HTTPProvider(MAINNET_RPC))
 
 pool = w3.eth.contract(
-    address=MAINNET_POOL_ADDRESS,
+    address=Web3.to_checksum_address(MAINNET_POOL_ADDRESS),
     abi=POOL_SLOT0_ABI_MINIMAL + [{
         "inputs": [], "name": "fee",
         "outputs": [{"internalType": "uint24", "name": "", "type": "uint24"}],
