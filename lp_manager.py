@@ -522,7 +522,19 @@ def get_live_pool_price(rpc_client, factory_address: str, token0: str, token1: s
     current_tick = slot0[1]
 
     raw_price = 1.0001 ** current_tick
-    return raw_price * (10 ** (token0_decimals - token1_decimals))
+    # KRITIEKE BUGFIX (4 sep 2026, gevonden tijdens de mainnet-
+    # migratie): Uniswap V3-achtige pools ordenen token0/token1 ALTIJD
+    # op numeriek adres (kleinste eerst) -- de tick-afgeleide prijs is
+    # ALTIJD "canoniek-token1 per canoniek-token0", ongeacht in welke
+    # volgorde DEZE FUNCTIE aangeroepen is. Op testnet was WHBAR
+    # toevallig altijd numeriek kleiner (dus canoniek token0) -- op
+    # mainnet is USDC numeriek kleiner dan WHBAR, dus omgedraaid.
+    # Empirisch bevestigd: zonder correctie gaf dit op mainnet 129263.98
+    # i.p.v. de correcte 0.0774 HBAR/USD.
+    if int(token0, 16) < int(token1, 16):
+        return raw_price * (10 ** (token0_decimals - token1_decimals))
+    else:
+        return (1.0 / raw_price) * (10 ** (token0_decimals - token1_decimals))
 
 
 def get_twap_tick(rpc_client, factory_address: str, token0: str, token1: str,
