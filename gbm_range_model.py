@@ -99,6 +99,7 @@ def compute_gbm_confidence_interval(
     horizon_hours: float,
     confidence_level: float = 0.80,
     macro_regime: str = "sideways",
+    apply_fat_tail_buffer: bool = True,
 ) -> GbmRangeResult:
     """
     Berekent een betrouwbaarheidsinterval voor de prijs op tijdstip T
@@ -113,6 +114,16 @@ def compute_gbm_confidence_interval(
     apply_regime_bias() is gehaald door de aanroeper, voor de
     nieuws-niveau-asymmetrie -- dit is een AANVULLENDE, macro-niveau
     versterking daarbovenop.
+
+    apply_fat_tail_buffer (4 sep 2026, NIEUW, op verzoek): standaard True
+    (ongewijzigd gedrag overal elders). De aanroeper kan dit op False
+    zetten voor een symmetrische, NIET fat-tail-scheve range -- specifiek
+    bedoeld voor het heropenen van een positie NA een reflex-uitstap,
+    waar het kapitaal toch al 100% in een enkel token staat en een
+    scheve range een onhaalbare heropenings-verhouding kan vereisen
+    (empirisch gevonden: 8145 HBAR nodig, 2279 beschikbaar, puur door de
+    15%-fat-tail-scheefheid). Buiten dat ene scenario blijft de
+    fat-tail-bescherming overal ongewijzigd van kracht.
     """
     if current_price <= 0 or horizon_hours <= 0:
         raise ValueError("current_price en horizon_hours moeten positief zijn.")
@@ -143,7 +154,8 @@ def compute_gbm_confidence_interval(
     # ONDERKANT (crashes zijn doorgaans abrupter/extremer dan pumps)
     # compenseert hiervoor, zonder de hele GBM-aanpak te vervangen.
     # AANNAME, geen empirisch geijkte waarde.
-    lower_price *= (1 - FAT_TAIL_BUFFER_FRACTION)
+    if apply_fat_tail_buffer:
+        lower_price *= (1 - FAT_TAIL_BUFFER_FRACTION)
 
     return GbmRangeResult(
         lower_price=lower_price,
