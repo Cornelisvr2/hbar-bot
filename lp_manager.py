@@ -1289,13 +1289,17 @@ class LpManager:
         increase_encoded = self.position_manager.encode_abi("increaseLiquidity", args=[increase_params])
         refund_eth_encoded = self.position_manager.encode_abi("refundETH")
 
+        # BUGFIX (4 sep 2026, zelfde patroon als de eerder gevonden en
+        # opgeloste dubbele-msg.value-bug in open_position()): payable_value
+        # stuurde voorheen het volledige, al-beschikbare bedrag NOGMAALS als
+        # native msg.value. Nu een klein, symbolisch bedrag i.p.v. het
+        # volledige bedrag nogmaals (claim_and_compound).
+        WHBAR_SYMBOLIC_MSG_VALUE_TINYBAR = 10 ** 8  # 1 HBAR, in tinybar
         payable_value = 0
         if self.config.whbar_address:
             whbar_lower = self.config.whbar_address.lower()
-            if self.config.token0.lower() == whbar_lower:
-                payable_value = tokens_owed0_raw * (10 ** (18 - self.config.token0_decimals))
-            elif self.config.token1.lower() == whbar_lower:
-                payable_value = tokens_owed1_raw * (10 ** (18 - self.config.token1_decimals))
+            if self.config.token0.lower() == whbar_lower or self.config.token1.lower() == whbar_lower:
+                payable_value = WHBAR_SYMBOLIC_MSG_VALUE_TINYBAR * (10 ** 10)
 
         mint_fee_tinybar = self._get_mint_fee_tinybar()
         if mint_fee_tinybar > 0:
@@ -1338,13 +1342,17 @@ class LpManager:
         increase_encoded = self.position_manager.encode_abi("increaseLiquidity", args=[increase_params])
         refund_eth_encoded = self.position_manager.encode_abi("refundETH")
 
+        # BUGFIX (4 sep 2026, zelfde patroon als de eerder gevonden en
+        # opgeloste dubbele-msg.value-bug in open_position()): payable_value
+        # stuurde voorheen het volledige, al-beschikbare bedrag NOGMAALS als
+        # native msg.value. Nu een klein, symbolisch bedrag i.p.v. het
+        # volledige bedrag nogmaals (deploy_additional_capital).
+        WHBAR_SYMBOLIC_MSG_VALUE_TINYBAR = 10 ** 8  # 1 HBAR, in tinybar
         payable_value = 0
         if self.config.whbar_address:
             whbar_lower = self.config.whbar_address.lower()
-            if self.config.token0.lower() == whbar_lower:
-                payable_value = amount0_desired * (10 ** (18 - self.config.token0_decimals))
-            elif self.config.token1.lower() == whbar_lower:
-                payable_value = amount1_desired * (10 ** (18 - self.config.token1_decimals))
+            if self.config.token0.lower() == whbar_lower or self.config.token1.lower() == whbar_lower:
+                payable_value = WHBAR_SYMBOLIC_MSG_VALUE_TINYBAR * (10 ** 10)
 
         mint_fee_tinybar = self._get_mint_fee_tinybar()
         if mint_fee_tinybar > 0:
