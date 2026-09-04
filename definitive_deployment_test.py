@@ -82,6 +82,18 @@ async def main():
     # die de gaskosten van de zojuist gedane balancerings-swap nog niet
     # heeft verwerkt.
     orchestrator._hbar_balance_cache = None
+    # Prijs OPNIEUW verversen vlak voor de daadwerkelijke mint-poging
+    # (26 aug 2026-patroon, hier expliciet herhaald na te laat gemerkt
+    # dat het testscript de vroege fresh_price bleef hergebruiken) --
+    # de wrap+approve-stappen hiervoor kosten tijd waarin de prijs kan
+    # bewegen, en de pool beoordeelt mint() altijd tegen ZIJN EIGEN,
+    # actuele prijs op dat moment.
+    fresh_price = get_live_pool_price(
+        orchestrator.rpc_client, lp.config.factory_address,
+        lp.config.token0, lp.config.token1, lp.config.fee_tier,
+        orchestrator._hbar_decimals, orchestrator._usdc_decimals,
+    )
+    print(f"Ververste prijs vlak voor mint: {fresh_price}")
     hbar_balance = orchestrator._get_swappable_hbar_balance(fresh_price)
     usdc_balance = orchestrator._get_swappable_usdc_balance()
     hbar_raw_final = int(hbar_balance * (10 ** 8))
