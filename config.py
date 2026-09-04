@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from hedera_address_utils import hedera_id_to_evm_address
 
 
-HEDERA_NETWORK = "testnet"  # 'testnet' of 'mainnet'
+HEDERA_NETWORK = "mainnet"  # 'testnet' of 'mainnet'
 
 NETWORK_SETTINGS = {
     "testnet": {
