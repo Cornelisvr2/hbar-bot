@@ -24,7 +24,10 @@ Dit is een belangrijk gegeven voor het vertrouwen in deze overstap: de mainnet-p
 
 ## Deel 2 — Nog open, vóór de overstap
 
-1. **Fee-tier van de mainnet-pool bevestigen** — momenteel een aanname (3000, zoals testnet) in `swap_executor_v2.py`. Rechtstreeks bij de pool zelf opvragen (`fee()`-call) vóór де eerste transactie.
+1. ~~Fee-tier van de mainnet-pool bevestigen~~ **BEVESTIGD (4 sep 2026)**: de daadwerkelijke fee-tier is **1500 (0,15%)**, NIET de aanname van 3000 (0,30%) die voor testnet gold. De bot leest dit via de omgevingsvariabele `LP_FEE_TIER` (regime_orchestrator.py, regel 430) -- geen codewijziging nodig, alleen instellen in `.env`:
+   ```
+   LP_FEE_TIER=1500
+   ```
 2. **HEDERA_NETWORK staat op TWEE plekken** — `config.py` (hardgecodeerd, regel 19) én `.env` (regel 26). Beide moeten naar `mainnet`, anders ontstaat een mismatch tussen wat de code denkt en wat er daadwerkelijk gebeurt.
 3. **Relay-account-uitsluiting herzien** — `0.0.7314364` (gebruikt om Hedera's JSON-RPC-relay uit te sluiten bij het berekenen van "totale stortingen") is testnet-specifiek; het mainnet-equivalent moet apart geverifieerd worden.
 4. **GeckoTerminal-netwerk-ID** — vandaag ontdekt dat `HEDERA_NETWORK_ID = "hedera-hashgraph"` in `geckoterminal_client.py` altijd al **mainnet** bevraagde (GeckoTerminal indexeert geen testnet). Op mainnet is dit dus eindelijk correct en consistent met de rest van de bot — geen wijziging nodig, maar wel goed om te beseffen dat de eerder gerapporteerde "Live pool-APR"-cijfers de hele tijd al échte, bruikbare mainnet-data waren.
