@@ -1,22 +1,24 @@
+from regime_orchestrator import RegimeOrchestrator
+from postgres_client import PostgresClient
+from lp_manager import get_live_pool_price
+import asyncio
 
-Factory: 0x00000000000000000000000000000000003c3951
-WHBAR: 0x0000000000000000000000000000000000163B5a
-USDC: 0x000000000000000000000000000000000006f89a
-Fee-tier (uit LP_FEE_TIER): 1500
+async def main():
+    db = PostgresClient()
+    await db.connect()
+    orchestrator = RegimeOrchestrator(db)
+    lp = orchestrator.lp_manager
 
-Daadwerkelijke, on-chain pool-prijs (1 HBAR in USDC): 0.077454
-root@srv1428932:~/hbar_bot# docker compose run --rm hbar-bot python3 -u check_position_76712.py
-WARN[0000] /root/hbar_bot/docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion
-[+]  1/1t 1/11
- ✔ Container hbar_bot-database-1 Running                                                                            0.0s
-Container hbar_bot-database-1 Waiting
-Container hbar_bot-database-1 Healthy
-Container hbar_bot-hbar-bot-run-bc50c5120264 Creating
-Container hbar_bot-hbar-bot-run-bc50c5120264 Created
-Positie 76712 on-chain: tick_lower=0, tick_upper=0, liquidity=0
+    print(f"lp.config.token0: {lp.config.token0} (decimals: {lp.config.token0_decimals})")
+    print(f"lp.config.token1: {lp.config.token1} (decimals: {lp.config.token1_decimals})")
 
-lp.config.token0: 0x000000000000000000000000000000000006f89a
-lp.config.token1: 0x0000000000000000000000000000000000163B5a
+    echte_prijs = get_live_pool_price(
+        orchestrator.rpc_client, lp.config.factory_address,
+        lp.config.token0, lp.config.token1, lp.config.fee_tier,
+        lp.config.token0_decimals, lp.config.token1_decimals,
+    )
+    print(f"\nCorrecte prijs, met de JUISTE decimalen (zoals de productie-code nu doet): {echte_prijs}")
 
-Werkelijke, correcte prijs NU (met dezelfde config-parameters): 129134.78978190898
-root@srv1428932:~/hbar_bot#
+    await db.close()
+
+asyncio.run(main())
