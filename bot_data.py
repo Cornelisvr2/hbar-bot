@@ -131,8 +131,14 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
             fee_hbar, fee_sauce = 0.0, 0.0
         fee_waarde_usd = fee_hbar * hbar_price_usd + fee_sauce * sauce_price_usd
 
-        prijs_onder = tick_to_price(positie["tick_lower"], 8, 6)
-        prijs_boven = tick_to_price(positie["tick_upper"], 8, 6)
+        # Canonieke token0/token1-decimalen bepalen (5 sep 2026, systematische audit -- zelfde detectie als _setup_lp_manager()
+        # in regime_orchestrator.py): ticks in de database zijn ALTIJD canoniek opgeslagen, ongeacht netwerk.
+        if int(base.whbar_token, 16) < int(base.usdc, 16):
+            _t0_dec, _t1_dec = 8, base.usdc_decimals
+        else:
+            _t0_dec, _t1_dec = base.usdc_decimals, 8
+        prijs_onder = tick_to_price(positie["tick_lower"], _t0_dec, _t1_dec)
+        prijs_boven = tick_to_price(positie["tick_upper"], _t0_dec, _t1_dec)
         if prijs_boven > prijs_onder:
             positie_in_range_pct = (
                 (pool_price_sauce_per_hbar - prijs_onder) / (prijs_boven - prijs_onder) * 100

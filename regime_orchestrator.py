@@ -635,8 +635,8 @@ class RegimeOrchestrator:
         # -- geen "regime_at_creation"-vergelijking meer nodig.
         huidige_tick_lower = self.lp_manager.state.tick_lower
         huidige_tick_upper = self.lp_manager.state.tick_upper
-        prijs_lower = tick_to_price(huidige_tick_lower, self._hbar_decimals, self._usdc_decimals)
-        prijs_upper = tick_to_price(huidige_tick_upper, self._hbar_decimals, self._usdc_decimals)
+        prijs_lower = tick_to_price(huidige_tick_lower, self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals)
+        prijs_upper = tick_to_price(huidige_tick_upper, self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals)
         centrum_huidig = (prijs_lower + prijs_upper) / 2
         huidige_breedte = (prijs_upper - prijs_lower) / (2 * centrum_huidig) if centrum_huidig > 0 else 0.0
 
@@ -657,8 +657,8 @@ class RegimeOrchestrator:
             macro_regime=self._cached_macro_regime,
             confidence_level=self._determine_gbm_confidence_level(combined_score_now),
         )
-        nieuwe_prijs_lower = tick_to_price(nieuwe_tick_lower, self._hbar_decimals, self._usdc_decimals)
-        nieuwe_prijs_upper = tick_to_price(nieuwe_tick_upper, self._hbar_decimals, self._usdc_decimals)
+        nieuwe_prijs_lower = tick_to_price(nieuwe_tick_lower, self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals)
+        nieuwe_prijs_upper = tick_to_price(nieuwe_tick_upper, self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals)
         centrum_nieuw = (nieuwe_prijs_lower + nieuwe_prijs_upper) / 2
         nieuwe_breedte = (nieuwe_prijs_upper - nieuwe_prijs_lower) / (2 * centrum_nieuw) if centrum_nieuw > 0 else 0.0
 
@@ -843,8 +843,8 @@ class RegimeOrchestrator:
         from lp_manager import tick_to_price
         tick_lower = self.lp_manager.state.tick_lower
         tick_upper = self.lp_manager.state.tick_upper
-        prijs_lower = tick_to_price(tick_lower, self._hbar_decimals, self._usdc_decimals)
-        prijs_upper = tick_to_price(tick_upper, self._hbar_decimals, self._usdc_decimals)
+        prijs_lower = tick_to_price(tick_lower, self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals)
+        prijs_upper = tick_to_price(tick_upper, self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals)
         if prijs_upper <= prijs_lower:
             return  # defensief, voorkomt een deling-door-nul verderop
         in_range_pct = (fresh_price - prijs_lower) / (prijs_upper - prijs_lower) * 100
