@@ -50,7 +50,8 @@ async def _build_dashboard_context() -> dict:
         from geckoterminal_client import GeckoTerminalClient
         gecko = GeckoTerminalClient()
         snapshot = gecko.get_pool_snapshot()
-        pool_apr = compute_fees_apr(snapshot.volume_24h_usd, 3000, snapshot.liquidity_usd)
+        fee_tier = int(os.environ.get("LP_FEE_TIER", "3000"))  # BUGFIX (5 sep 2026, systematische audit): was hardgecodeerd op 3000, ongeacht de daadwerkelijke pool-fee-tier (1500 op mainnet)
+        pool_apr = compute_fees_apr(snapshot.volume_24h_usd, fee_tier, snapshot.liquidity_usd)
 
         # Projecties (1 sep 2026, op verzoek) -- dagelijks samengestelde
         # rente op basis van de HUIDIGE pool-APR, zoals besproken: NIET
