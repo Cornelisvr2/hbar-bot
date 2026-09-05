@@ -2042,6 +2042,7 @@ class RegimeOrchestrator:
         # safetynet_retry_cooldown_seconds, standaard 30 minuten) zolang er
         # geen actieve positie is -- kapitaal staat anders nutteloos los in
         # de wallet i.p.v. fees te verdienen, voor onbepaalde tijd.
+        print(f"[DEBUG-vangnet] regime={self.current_regime}, lp_manager={self.lp_manager is not None}, is_open={self.lp_manager.state.is_open if self.lp_manager else 'N/A'}, seconds_since={time.time() - self._last_safetynet_attempt_at:.1f}, cooldown={self.safetynet_retry_cooldown_seconds}")
         seconds_since_last_safetynet_attempt = time.time() - self._last_safetynet_attempt_at
         if (self.current_regime == Regime.LP_MODE and self.lp_manager
                 and not self.lp_manager.state.is_open
@@ -2057,6 +2058,7 @@ class RegimeOrchestrator:
             percentage_reserve = total_hbar_balance * (1 - LP_SAFETYNET_DEPLOY_FRACTION)
             reserve_hbar = max(percentage_reserve, LP_SAFETYNET_MIN_RESERVE_HBAR)
             deployable_hbar = max(0.0, total_hbar_balance - reserve_hbar)
+            print(f"[DEBUG-vangnet2] total_hbar_balance={total_hbar_balance:.4f}, reserve_hbar={reserve_hbar:.4f}, deployable_hbar={deployable_hbar:.4f}")
 
             if deployable_hbar > 0:
                 from lp_manager import compute_amount1_for_amount0, compute_amount0_for_amount1, get_live_pool_price
@@ -2083,7 +2085,9 @@ class RegimeOrchestrator:
                 # naar TWAP-gebaseerd) -- vóórdat we op basis van
                 # fresh_price een positie gaan openen.
                 from lp_manager import price_to_tick
-                huidige_tick = price_to_tick(fresh_price, self._hbar_decimals, self._usdc_decimals)
+                huidige_tick = price_to_tick(
+                    fresh_price, self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
+                )
                 if not self._check_price_oracle_divergence(huidige_tick):
                     return  # wacht tot de volgende cyclus, veiligheidsmelding is al verstuurd
 
@@ -2728,7 +2732,9 @@ class RegimeOrchestrator:
             # Prijs-orakel-manipulatie-check (30 aug 2026, HERZIEN naar
             # TWAP-gebaseerd).
             from lp_manager import price_to_tick
-            huidige_tick = price_to_tick(fresh_price, self._hbar_decimals, self._usdc_decimals)
+            huidige_tick = price_to_tick(
+                fresh_price, self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
+            )
             if not self._check_price_oracle_divergence(huidige_tick):
                 return all_succeeded  # wacht tot de volgende cyclus
 
