@@ -11,7 +11,7 @@ if start_idx is None:
     print("WAARSCHUWING: startregel niet gevonden -- mogelijk al eerder bijgewerkt.")
 else:
     eind_idx = None
-    for j in range(start_idx, start_idx + 20):
+    for j in range(start_idx, start_idx + 30):
         if "sauce_address, 3000, 8, 6," in regels[j]:
             eind_idx = j
             break
