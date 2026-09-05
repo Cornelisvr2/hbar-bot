@@ -1209,7 +1209,7 @@ class RegimeOrchestrator:
         usdc_raw_available = int(usdc_balance * (10 ** self._usdc_decimals))
         needed_usdc_for_full_hbar = compute_amount1_for_amount0(
             hbar_raw_available, fresh_price, tick_lower, tick_upper,
-            self._hbar_decimals, self._usdc_decimals,
+            self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
         )
         if needed_usdc_for_full_hbar <= usdc_raw_available:
             hbar_raw, usdc_raw = hbar_raw_available, needed_usdc_for_full_hbar
@@ -1217,7 +1217,7 @@ class RegimeOrchestrator:
             usdc_raw = usdc_raw_available
             hbar_raw = compute_amount0_for_amount1(
                 usdc_raw_available, fresh_price, tick_lower, tick_upper,
-                self._hbar_decimals, self._usdc_decimals,
+                self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
             )
 
         try:
@@ -1300,7 +1300,7 @@ class RegimeOrchestrator:
 
         needed_usdc_for_full_hbar = compute_amount1_for_amount0(
             hbar_raw, current_price, tick_lower, tick_upper,
-            self._hbar_decimals, self._usdc_decimals,
+            self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
         )
 
         # Diagnostische logging (30 aug 2026, op verzoek: na een
@@ -1347,7 +1347,7 @@ class RegimeOrchestrator:
 
         needed_hbar_for_full_usdc = compute_amount0_for_amount1(
             usdc_raw, current_price, tick_lower, tick_upper,
-            self._hbar_decimals, self._usdc_decimals,
+            self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
         )
         print(f"[balans-diagnose] needed_hbar_for_full_usdc={needed_hbar_for_full_usdc}")
         if needed_hbar_for_full_usdc > hbar_raw:
@@ -2167,7 +2167,7 @@ class RegimeOrchestrator:
                     # swap), dus blijft dit defensief gecheckt.
                     needed_usdc_for_full_hbar = compute_amount1_for_amount0(
                         hbar_raw_available, fresh_price, tick_lower, tick_upper,
-                        self._hbar_decimals, self._usdc_decimals,
+                        self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
                     )
                     if needed_usdc_for_full_hbar <= usdc_raw_available:
                         hbar_raw = hbar_raw_available
@@ -2176,7 +2176,7 @@ class RegimeOrchestrator:
                         usdc_raw = usdc_raw_available
                         hbar_raw = compute_amount0_for_amount1(
                             usdc_raw_available, fresh_price, tick_lower, tick_upper,
-                            self._hbar_decimals, self._usdc_decimals,
+                            self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
                         )
 
                     hbar_to_deploy = hbar_raw / (10 ** self._hbar_decimals)
@@ -2834,7 +2834,7 @@ class RegimeOrchestrator:
                 usdc_raw_available = int(final_usdc_balance * (10 ** self._usdc_decimals))
                 needed_usdc_for_full_hbar = compute_amount1_for_amount0(
                     hbar_raw_available, current_price, tick_lower, tick_upper,
-                    self._hbar_decimals, self._usdc_decimals,
+                    self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
                 )
                 if needed_usdc_for_full_hbar <= usdc_raw_available:
                     hbar_raw, usdc_raw = hbar_raw_available, needed_usdc_for_full_hbar
@@ -2842,7 +2842,7 @@ class RegimeOrchestrator:
                     usdc_raw = usdc_raw_available
                     hbar_raw = compute_amount0_for_amount1(
                         usdc_raw_available, current_price, tick_lower, tick_upper,
-                        self._hbar_decimals, self._usdc_decimals,
+                        self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
                     )
 
                 try:
