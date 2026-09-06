@@ -274,7 +274,12 @@ def get_total_deposits_hbar(account_evm_address: str) -> float:
     # eerder, veel te hoog berekend totaal (7420 i.p.v. de werkelijke
     # ~2128 HBAR). AANNAME: dit relay-account-ID is TESTNET-specifiek en
     # kan bij een mainnet-migratie anders zijn -- dan opnieuw verifieren.
-    BEKENDE_RELAY_ACCOUNTS = {"0.0.7314364"}
+    # BUGFIX (6 sep 2026): mainnet-relay-account toegevoegd -- 0.0.995584
+    # geverifieerd als de consequente initiator van al onze
+    # ETHEREUMTRANSACTION-aanroepen op mainnet (via de mirror-node-
+    # transactiegeschiedenis, zelfde detectiemethode als de testnet-
+    # ontdekking hiervoor).
+    BEKENDE_RELAY_ACCOUNTS = {"0.0.7314364", "0.0.995584"}
 
     while volgende_url and pagina_teller < MAX_PAGINAS:
         resp = requests.get(volgende_url, timeout=15)
