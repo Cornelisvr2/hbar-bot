@@ -1048,7 +1048,7 @@ class LpManager:
         else:
             return compute_amount0_for_amount1(
                 hbar_raw, price, tick_lower, tick_upper,
-                self.config.token1_decimals, self.config.token0_decimals,
+                self.config.token0_decimals, self.config.token1_decimals,
             )
     def compute_needed_hbar_for_usdc(self, usdc_raw: int, price: float,
                                        tick_lower: int, tick_upper: int) -> int:
@@ -1066,7 +1066,7 @@ class LpManager:
         else:
             return compute_amount1_for_amount0(
                 usdc_raw, price, tick_lower, tick_upper,
-                self.config.token1_decimals, self.config.token0_decimals,
+                self.config.token0_decimals, self.config.token1_decimals,
             )
     def is_price_out_of_range(self, current_price: float) -> bool:
         """Checkt of de huidige prijs nog binnen de actieve positie-marge valt."""
