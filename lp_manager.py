@@ -1068,6 +1068,58 @@ class LpManager:
                 usdc_raw, price, tick_lower, tick_upper,
                 self.config.token0_decimals, self.config.token1_decimals,
             )
+    def compute_optimal_swap_for_position(self, hbar_raw: int, usdc_raw: int,
+                                            price: float, tick_lower: int, tick_upper: int,
+                                            min_swap_fraction: float = 0.005) -> tuple:
+        """
+        Berekent in EEN, wiskundig exacte stap hoeveel en in welke
+        richting geswapt moet worden om de juiste HBAR:USDC-verhouding
+        voor deze positie te bereiken -- werkt ook vanuit een volledig
+        eenzijdige startpositie (bv. na een reflex-uitstap), i.p.v. de
+        oude "raad de helft van het tekort, geef anders op"-heuristiek
+        (6 sep 2026: die kon een 100%-eenzijdige positie NOOIT
+        balanceren, aangezien het berekende swap-bedrag dan per
+        definitie de volledige, eenzijdige balans kon overschrijden).
+
+        Retourneert (richting, bedrag_raw) -- richting is
+        "HBAR_TO_USDC", "USDC_TO_HBAR", of None als al voldoende
+        gebalanceerd (binnen min_swap_fraction van de HBAR-waarde,
+        met een absolute ondergrens van 0.01 HBAR om micro-swaps met
+        alleen gaskosten te voorkomen).
+        """
+        hbar_is_token0 = (
+            self.config.whbar_address is not None
+            and int(self.config.token0, 16) == int(self.config.whbar_address, 16)
+        )
+        hbar_decimals = self.config.token0_decimals if hbar_is_token0 else self.config.token1_decimals
+        usdc_decimals = self.config.token1_decimals if hbar_is_token0 else self.config.token0_decimals
+        referentie_hbar_raw = 10 ** hbar_decimals  # 1 HBAR als referentie-eenheid
+        referentie_usdc_needed_raw = self.compute_needed_usdc_for_hbar(
+            referentie_hbar_raw, price, tick_lower, tick_upper
+        )
+        k = referentie_usdc_needed_raw / (10 ** usdc_decimals)  # benodigde USDC per 1 HBAR, voor DEZE prijs/range
+        hbar_have_h = hbar_raw / (10 ** hbar_decimals)
+        usdc_have_h = usdc_raw / (10 ** usdc_decimals)
+        # BUGFIX: voor de WAARDE-berekening (HBAR -> USDC-equivalent)
+        # is de MENSVRIENDELIJKE prijs (USDC per HBAR) nodig, niet de
+        # canonieke `price`-parameter (die op mainnet WHBAR-per-USDC
+        # is). k zelf blijft in dezelfde eenheid als price/(price+k)
+        # hieronder -- daarom wordt k HIER ook omgerekend.
+        prijs_semantisch = price if hbar_is_token0 else (1.0 / price)
+        totale_waarde_usdc = hbar_have_h * prijs_semantisch + usdc_have_h
+        if (prijs_semantisch + k) <= 0 or totale_waarde_usdc <= 0:
+            return (None, 0)
+        target_hbar_h = totale_waarde_usdc / (prijs_semantisch + k)
+        verschil_hbar_h = hbar_have_h - target_hbar_h
+        if abs(verschil_hbar_h) < max(hbar_have_h * min_swap_fraction, 0.01):
+            return (None, 0)
+        if verschil_hbar_h > 0:
+            swap_raw = int(verschil_hbar_h * (10 ** hbar_decimals))
+            return ("HBAR_TO_USDC", swap_raw)
+        else:
+            usdc_swap_h = abs(verschil_hbar_h) * prijs_semantisch
+            swap_raw = int(usdc_swap_h * (10 ** usdc_decimals))
+            return ("USDC_TO_HBAR", swap_raw)
     def is_price_out_of_range(self, current_price: float) -> bool:
         """Checkt of de huidige prijs nog binnen de actieve positie-marge valt."""
         if not self.state.is_open:
