@@ -1320,7 +1320,9 @@ class RegimeOrchestrator:
                       f"({hbar_balance:.4f} HBAR) -- geklemd naar 95%.")
                 hbar_to_swap = hbar_balance * 0.95
             if hbar_to_swap > 0.01:  # ondergrens om micro-swaps met alleen gaskosten te voorkomen
-                await self._run_swap_and_log("HBAR_TO_USDC", hbar_to_swap, None)
+                swap_gelukt = await self._run_swap_and_log("HBAR_TO_USDC", hbar_to_swap, None)
+                if not swap_gelukt:
+                    return False  # swap mislukt -- NIET doorgaan met een verouderde balans-aanname
             return True
         else:  # richting == "USDC_TO_HBAR"
             usdc_to_swap = bedrag_raw / (10 ** self._usdc_decimals)
@@ -1330,7 +1332,9 @@ class RegimeOrchestrator:
                       f"({usdc_balance:.4f} SAUCE) -- geklemd naar 95%.")
                 usdc_to_swap = usdc_balance * 0.95
             if usdc_to_swap > 1.0:  # ondergrens
-                await self._run_swap_and_log("USDC_TO_HBAR", usdc_to_swap, None)
+                swap_gelukt = await self._run_swap_and_log("USDC_TO_HBAR", usdc_to_swap, None)
+                if not swap_gelukt:
+                    return False  # swap mislukt -- NIET doorgaan met een verouderde balans-aanname
             return True
 
     async def _reconcile_lp_position_on_startup(self):
