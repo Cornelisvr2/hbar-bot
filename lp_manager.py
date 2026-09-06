@@ -1210,16 +1210,37 @@ class LpManager:
         de normale approve()+mint()-stroom, met een MINIMALE msg.value
         (alleen voor de mint-fee, niet meer voor de tokenkant zelf).
         """
+        # KRITIEKE STRUCTURELE BUGFIX (6 sep 2026): amount0_desired/
+        # amount1_desired komen van de aanroeper ALTIJD als (hbar_raw,
+        # usdc_raw) -- maar deze functie moet ze in CANONIEKE
+        # (token0, token1)-volgorde gebruiken voor de wrap-stap en de
+        # MintParams-struct. Op mainnet (USDC=token0, WHBAR=token1)
+        # werden deze eerder verwisseld -- verklaart zowel de
+        # herhaaldelijk terugkerende "0.2317 WHBAR vastzittend"-
+        # meldingen (USDC-bedrag gewrapt als HBAR) als de aanhoudende
+        # "Price slippage check"-fouten (bedragen aan de verkeerde
+        # token toegewezen in de MintParams-struct).
+        hbar_is_token0 = (
+            self.config.whbar_address is not None
+            and self.config.token0.lower() == self.config.whbar_address.lower()
+        )
+        if hbar_is_token0:
+            canonical_amount0_desired = amount0_desired  # HBAR
+            canonical_amount1_desired = amount1_desired  # USDC
+        else:
+            canonical_amount0_desired = amount1_desired  # USDC (canoniek token0 op mainnet)
+            canonical_amount1_desired = amount0_desired  # HBAR (canoniek token1 op mainnet)
+
         # Stap 1: HBAR EXPLICIET inwikkelen tot echte WHBAR-ERC20-tokens
         # (26 aug 2026 -- zie uitgebreide toelichting hierboven).
         if self.config.whbar_address and self.whbar_helper:
             whbar_lower = self.config.whbar_address.lower()
             whbar_amount_needed = None
             if self.config.token0.lower() == whbar_lower:
-                whbar_amount_needed = amount0_desired
+                whbar_amount_needed = canonical_amount0_desired
                 whbar_decimals = self.config.token0_decimals
             elif self.config.token1.lower() == whbar_lower:
-                whbar_amount_needed = amount1_desired
+                whbar_amount_needed = canonical_amount1_desired
                 whbar_decimals = self.config.token1_decimals
 
             if whbar_amount_needed is not None:
@@ -1243,8 +1264,8 @@ class LpManager:
         # terwijl wij dat bedrag vooraf benaderen via Python's floating-
         # point-wiskunde, wat een kleine afrondingsafwijking kan geven.
         APPROVAL_SAFETY_MARGIN = 1.005
-        self._ensure_token_approval(self.config.token0, int(amount0_desired * APPROVAL_SAFETY_MARGIN))
-        self._ensure_token_approval(self.config.token1, int(amount1_desired * APPROVAL_SAFETY_MARGIN))
+        self._ensure_token_approval(self.config.token0, int(canonical_amount0_desired * APPROVAL_SAFETY_MARGIN))
+        self._ensure_token_approval(self.config.token1, int(canonical_amount1_desired * APPROVAL_SAFETY_MARGIN))
 
         if precomputed_tick_range is not None:
             tick_lower, tick_upper = precomputed_tick_range
@@ -1257,10 +1278,10 @@ class LpManager:
             self.config.fee_tier,
             tick_lower,
             tick_upper,
-            amount0_desired,
-            amount1_desired,
-            int(amount0_desired * (1 - slippage_tolerance)),
-            int(amount1_desired * (1 - slippage_tolerance)),
+            canonical_amount0_desired,
+            canonical_amount1_desired,
+            int(canonical_amount0_desired * (1 - slippage_tolerance)),
+            int(canonical_amount1_desired * (1 - slippage_tolerance)),
             self.rpc_client.address,
             self._deadline(),
         )
