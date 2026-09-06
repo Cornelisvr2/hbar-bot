@@ -1462,16 +1462,31 @@ class LpManager:
 
         Geeft de tx_hash terug bij succes, of None bij een mislukking.
         """
+        # KRITIEKE BUGFIX (6 sep 2026, zelfde patroon als open_position()):
+        # amount0_desired/amount1_desired komen van de aanroeper ALTIJD als
+        # (hbar_raw, usdc_raw) -- moeten hier herordend worden naar de
+        # canonieke (token0, token1)-volgorde van de bestaande positie.
+        hbar_is_token0 = (
+            self.config.whbar_address is not None
+            and self.config.token0.lower() == self.config.whbar_address.lower()
+        )
+        if hbar_is_token0:
+            canonical_amount0_desired = amount0_desired
+            canonical_amount1_desired = amount1_desired
+        else:
+            canonical_amount0_desired = amount1_desired
+            canonical_amount1_desired = amount0_desired
+
         if self.config.whbar_address:
             whbar_lower = self.config.whbar_address.lower()
             if self.config.token0.lower() != whbar_lower:
-                self._ensure_token_approval(self.config.token0, amount0_desired)
+                self._ensure_token_approval(self.config.token0, canonical_amount0_desired)
             if self.config.token1.lower() != whbar_lower:
-                self._ensure_token_approval(self.config.token1, amount1_desired)
+                self._ensure_token_approval(self.config.token1, canonical_amount1_desired)
 
-        min0 = int(amount0_desired * (1 - slippage_tolerance))
-        min1 = int(amount1_desired * (1 - slippage_tolerance))
-        increase_params = (token_id, amount0_desired, amount1_desired, min0, min1, self._deadline())
+        min0 = int(canonical_amount0_desired * (1 - slippage_tolerance))
+        min1 = int(canonical_amount1_desired * (1 - slippage_tolerance))
+        increase_params = (token_id, canonical_amount0_desired, canonical_amount1_desired, min0, min1, self._deadline())
         increase_encoded = self.position_manager.encode_abi("increaseLiquidity", args=[increase_params])
         refund_eth_encoded = self.position_manager.encode_abi("refundETH")
 
