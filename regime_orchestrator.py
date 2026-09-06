@@ -2131,9 +2131,28 @@ class RegimeOrchestrator:
 
                     hbar_to_deploy = hbar_raw / (10 ** self._hbar_decimals)
                     usdc_to_deploy = usdc_raw / (10 ** self._usdc_decimals)
+                    # BUGFIX (6 sep 2026): prijs NOGMAALS verversen, vlak
+                    # vóór open_position() zelf -- de swap hierboven (met
+                    # wachten op bevestiging) kost echte tijd, waarin de
+                    # eerder opgehaalde fresh_price kan zijn verouderd.
+                    # SaucerSwap's eigen developer-documentatie (new-
+                    # liquidity-position.md) haalt de prijs ÉÉN keer op en
+                    # gebruikt die DIRECT, zonder een tijdrovende stap
+                    # ertussen -- onze flow moet dat patroon zo dicht
+                    # mogelijk benaderen door hier opnieuw te verversen.
+                    from lp_manager import get_live_pool_price as _get_live_pool_price_voor_mint
+                    try:
+                        mint_price = _get_live_pool_price_voor_mint(
+                            self.rpc_client, self.lp_manager.config.factory_address,
+                            self.lp_manager.config.token0, self.lp_manager.config.token1,
+                            self.lp_manager.config.fee_tier,
+                            self.lp_manager.config.token0_decimals, self.lp_manager.config.token1_decimals,
+                        )
+                    except Exception:
+                        mint_price = fresh_price
                     try:
                         self.lp_manager.open_position(
-                            hbar_raw, usdc_raw, fresh_price, slippage_tolerance=0.25,
+                            hbar_raw, usdc_raw, mint_price, slippage_tolerance=0.25,
                             gas_limit_override=1_200_000,
                             precomputed_tick_range=(tick_lower, tick_upper),
                         )
