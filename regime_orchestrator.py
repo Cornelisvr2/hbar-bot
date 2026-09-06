@@ -999,6 +999,11 @@ class RegimeOrchestrator:
         hbar_raw = int(hbar_balance * BIJSTORT_VEILIGHEIDSMARGE * (10 ** self._hbar_decimals))
         usdc_raw = int(usdc_balance * BIJSTORT_VEILIGHEIDSMARGE * (10 ** self._usdc_decimals))
 
+        # BUGFIX (6 sep 2026): cooldown ALTIJD zetten, ongeacht succes/
+        # falen -- voorkomt een herhaal-lus zonder rem bij elke
+        # mislukking (zelfde patroon als eerder al gerepareerd bij het
+        # vangnet).
+        self._last_capital_deploy_at = time.time()
         try:
             tx_hash = self.lp_manager.deploy_additional_capital(
                 self.lp_manager.state.token_id, hbar_raw, usdc_raw,
@@ -1009,7 +1014,6 @@ class RegimeOrchestrator:
                     f"{self.lp_manager.state.token_id}: "
                     f"{hbar_balance:.4f} HBAR + {usdc_balance:.2f} SAUCE."
                 )
-                self._last_capital_deploy_at = time.time()
             else:
                 telegram_notify.report_error(
                     "regime_loop: kapitaal bijstorten",
@@ -2069,6 +2073,7 @@ class RegimeOrchestrator:
                 )
 
                 if swap_success:
+                    print("[DIAGNOSE-stap] 1: if swap_success: bereikt")
                     hbar_balance = self._get_swappable_hbar_balance(current_price)
                     # Niet meer inzetten dan het inzetbare deel, ook al kan de
                     # totale swappable balans nu toevallig hoger zijn.
@@ -2095,6 +2100,7 @@ class RegimeOrchestrator:
                         )
                     except Exception:
                         fresh_price = current_price  # val terug op de oude prijs als ophalen faalt
+                    print(f"[DIAGNOSE-stap] 2: fresh_price ververst = {fresh_price}")
                     combined_score_now = compute_fixed_combined_score(self._cached_btc_score, self._cached_hbar_score)
                     combined_volatility_sigma_now = compute_combined_volatility_sigma(
                         self._cached_btc_volatility_sigma, self._cached_hbar_volatility_sigma
@@ -2109,6 +2115,7 @@ class RegimeOrchestrator:
                         macro_regime=self._cached_macro_regime,
                         confidence_level=self._determine_gbm_confidence_level(combined_score_now),
                     )
+                    print(f"[DIAGNOSE-stap] 3: range berekend, tick_lower={tick_lower}, tick_upper={tick_upper}")
 
                     hbar_raw_available = int(hbar_balance * (10 ** self._hbar_decimals))
                     usdc_raw_available = int(usdc_balance * (10 ** self._usdc_decimals))
@@ -2131,6 +2138,7 @@ class RegimeOrchestrator:
 
                     hbar_to_deploy = hbar_raw / (10 ** self._hbar_decimals)
                     usdc_to_deploy = usdc_raw / (10 ** self._usdc_decimals)
+                    print(f"[DIAGNOSE-stap] 4: bedragen berekend, hbar_raw={hbar_raw}, usdc_raw={usdc_raw}")
                     # BUGFIX (6 sep 2026): prijs NOGMAALS verversen, vlak
                     # vóór open_position() zelf -- de swap hierboven (met
                     # wachten op bevestiging) kost echte tijd, waarin de
@@ -2150,6 +2158,7 @@ class RegimeOrchestrator:
                         )
                     except Exception:
                         mint_price = fresh_price
+                    print(f"[DIAGNOSE-stap] 5: vlak voor open_position(), mint_price={mint_price}")
                     try:
                         self.lp_manager.open_position(
                             hbar_raw, usdc_raw, mint_price, slippage_tolerance=0.25,
