@@ -2177,7 +2177,7 @@ class RegimeOrchestrator:
                     usdc_to_deploy = usdc_raw / (10 ** self._usdc_decimals)
                     try:
                         self.lp_manager.open_position(
-                            hbar_raw, usdc_raw, fresh_price, slippage_tolerance=0.15,
+                            hbar_raw, usdc_raw, fresh_price, slippage_tolerance=0.25,
                             gas_limit_override=1_200_000,
                             precomputed_tick_range=(tick_lower, tick_upper),
                         )
