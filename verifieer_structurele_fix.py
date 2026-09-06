@@ -25,7 +25,7 @@ config_testnet = LpPositionConfig(
     token0_decimals=8,   # WHBAR
     token1_decimals=6,   # USDC
 )
-lp_testnet = LpManager(config_testnet)
+lp_testnet = LpManager(None, config_testnet)
 
 prijs = 0.08  # USDC per HBAR, canoniek EN semantisch identiek hier
 tick_lower, tick_upper = -71700, -70680  # zelfde range als eerdere, succesvolle test
@@ -49,7 +49,7 @@ config_mainnet = LpPositionConfig(
     token0_decimals=6,   # USDC
     token1_decimals=8,   # WHBAR
 )
-lp_mainnet = LpManager(config_mainnet)
+lp_mainnet = LpManager(None, config_mainnet)
 
 # Zelfde prijs/range/hbar_raw als hierboven, maar nu in de CANONIEKE
 # schaal (token1_per_token0 = WHBAR_per_USDC = 1/0.08 = 12.5)
