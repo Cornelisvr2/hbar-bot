@@ -1,0 +1,42 @@
+diff --git a/lp_manager.py b/lp_manager.py
+--- a/lp_manager.py
++++ b/lp_manager.py
+@@ -1498,12 +1498,18 @@ class LpManager:
+                 self.rpc_client.wait_for_receipt(wrap_tx)
+                 time.sleep(2)
+ 
+-        if self.config.whbar_address:
+-            whbar_lower = self.config.whbar_address.lower()
+-            if self.config.token0.lower() != whbar_lower:
+-                self._ensure_token_approval(self.config.token0, canonical_amount0_desired)
+-            if self.config.token1.lower() != whbar_lower:
+-                self._ensure_token_approval(self.config.token1, canonical_amount1_desired)
++        # KRITIEKE BUGFIX (7 sep 2026, gevonden bij de eerste echte
++        # mainnet-bijstorting): WHBAR werd hier BEWUST NIET goedgekeurd,
++        # terwijl de wrap-stap hierboven het HBAR juist als WHBAR in de
++        # wallet zet. De PositionManager haalt dat WHBAR dan op via
++        # transferFrom() (msg.value is immers alleen symbolisch), en dat
++        # vereist een allowance -- precies zoals open_position() al voor
++        # BEIDE tokens doet (met dezelfde 0,5%-marge). Zonder deze
++        # approve revertte increaseLiquidity() met 596,88 WHBAR + 10,95
++        # USDC achterblijvend in de wallet.
++        APPROVAL_SAFETY_MARGIN = 1.005
++        self._ensure_token_approval(self.config.token0, int(canonical_amount0_desired * APPROVAL_SAFETY_MARGIN))
++        self._ensure_token_approval(self.config.token1, int(canonical_amount1_desired * APPROVAL_SAFETY_MARGIN))
+ 
+         min0 = int(canonical_amount0_desired * (1 - slippage_tolerance))
+         min1 = int(canonical_amount1_desired * (1 - slippage_tolerance))
+@@ -1528,7 +1534,12 @@ class LpManager:
+             payable_value += mint_fee_tinybar * (10 ** 10)
+ 
+         multicall_fn = self.position_manager.functions.multicall([increase_encoded, refund_eth_encoded])
+-        increase_tx = self.rpc_client.build_and_send_transaction(multicall_fn, value_wei=payable_value)
++        # (7 sep 2026) Vaste gas-limiet, zelfde als open_position() --
++        # eth_estimateGas via de mirrornode-simulatie is op mainnet
++        # onbetrouwbaar.
++        increase_tx = self.rpc_client.build_and_send_transaction(
++            multicall_fn, value_wei=payable_value, gas_limit=1_200_000,
++        )
+         increase_receipt = self.rpc_client.wait_for_receipt(increase_tx)
+ 
+         return increase_tx if increase_receipt["status"] == "success" else None

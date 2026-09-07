@@ -127,8 +127,19 @@ class HederaRpcClient:
             estimate_params = {"from": self.account.address}
             if value_wei > 0:
                 estimate_params["value"] = value_wei
-            estimated_gas = contract_function.estimate_gas(estimate_params)
-            gas_limit = int(estimated_gas * 1.5)  # 50% veiligheidsmarge
+            try:
+                estimated_gas = contract_function.estimate_gas(estimate_params)
+                gas_limit = int(estimated_gas * 1.5)  # 50% veiligheidsmarge
+            except Exception as e:
+                # (7 sep 2026) eth_estimateGas loopt via de mirrornode-
+                # simulatie, en die weigert op mainnet structureel voor
+                # sommige contracten ("Invalid request" / "Too Many
+                # Requests"), ook al slaagt de echte transactie gewoon.
+                # Dan terugvallen op een vaste, ruime limiet i.p.v. de
+                # hele actie te laten stranden.
+                gas_limit = int(os.environ.get("FALLBACK_GAS_LIMIT", "1000000"))
+                print(f"[rpc] estimateGas mislukt ({str(e)[:120]}) -- "
+                      f"fallback gas_limit={gas_limit}")
 
         tx_params = {
             "chainId": self.network.chain_id,

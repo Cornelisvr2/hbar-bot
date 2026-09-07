@@ -22,6 +22,7 @@ een fee-tier hardcodeert; een verkeerde tier levert gewoon een revert op
 (geen fondsverlies, maar wel een mislukte trade).
 """
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -143,6 +144,32 @@ class SwapConfigV2:
     fee_tier: int = 3000  # 0.3% -- VERIFIEER dit tegen de daadwerkelijke pool
     slippage_tolerance: float = 0.01
     deadline_seconds: int = 120
+    factory_address: Optional[str] = None  # (7 sep 2026) voor de pool-prijs-fallback-quote
+
+
+# (7 sep 2026) Minimale ABI's om de poolprijs rechtstreeks uit slot0 te
+# lezen -- fallback voor als de QuoterV2-simulatie weigert (op mainnet
+# structureel waargenomen: elke eth_call naar de quoter geeft "Invalid
+# request", terwijl factory/router/pool gewoon antwoorden).
+_FACTORY_GETPOOL_ABI = [{
+    "name": "getPool", "type": "function", "stateMutability": "view",
+    "inputs": [{"name": "tokenA", "type": "address"}, {"name": "tokenB", "type": "address"},
+               {"name": "fee", "type": "uint24"}],
+    "outputs": [{"name": "pool", "type": "address"}],
+}]
+_POOL_SLOT0_ABI = [{
+    "name": "slot0", "type": "function", "stateMutability": "view", "inputs": [],
+    "outputs": [{"name": "sqrtPriceX96", "type": "uint160"}, {"name": "tick", "type": "int24"},
+                {"name": "observationIndex", "type": "uint16"},
+                {"name": "observationCardinality", "type": "uint16"},
+                {"name": "observationCardinalityNext", "type": "uint16"},
+                {"name": "feeProtocol", "type": "uint8"}, {"name": "unlocked", "type": "bool"}],
+}]
+
+# Vaste gas-limiet voor swaps (7 sep 2026): eth_estimateGas loopt via
+# dezelfde mirrornode-simulatie die op mainnet onbetrouwbaar bleek. Het
+# mint-pad gebruikt om dezelfde reden al een vaste 1.200.000.
+SWAP_GAS_LIMIT = int(os.environ.get("SWAP_GAS_LIMIT", "1000000"))
 
 
 @dataclass
@@ -179,7 +206,53 @@ class SwapExecutorV2:
     def _apply_slippage(self, amount_out: int) -> int:
         return int(amount_out * (1 - self.config.slippage_tolerance))
 
+    def _pool_usdc_per_hbar(self) -> float:
+        """
+        (7 sep 2026) Leest de actuele prijs (USDC per HBAR, mensvriendelijk)
+        rechtstreeks uit slot0 van de pool. Canonieke token0/token1-
+        volgorde is puur numeriek (kleinste adres eerst) -- op mainnet is
+        dat USDC=token0, WHBAR=token1; op testnet andersom. Hier expliciet
+        afgehandeld, geen aanname.
+        """
+        if not self.config.factory_address:
+            raise RuntimeError("factory_address ontbreekt in SwapConfigV2 -- geen pool-fallback mogelijk")
+        w3 = self.rpc_client.w3
+        factory = w3.eth.contract(address=self.config.factory_address, abi=_FACTORY_GETPOOL_ABI)
+        pool_addr = factory.functions.getPool(
+            self.config.whbar_address, self.config.usdc_address, self.config.fee_tier
+        ).call()
+        if int(pool_addr, 16) == 0:
+            raise RuntimeError(f"Geen pool voor WHBAR/USDC op fee_tier={self.config.fee_tier}")
+        pool = w3.eth.contract(address=pool_addr, abi=_POOL_SLOT0_ABI)
+        sqrt_price_x96 = pool.functions.slot0().call()[0]
+        raw = (sqrt_price_x96 / (2 ** 96)) ** 2  # token1_raw per token0_raw
+        whbar_is_token0 = int(self.config.whbar_address, 16) < int(self.config.usdc_address, 16)
+        if whbar_is_token0:
+            # token1=USDC per token0=WHBAR
+            return raw * (10 ** (self.config.whbar_decimals - self.config.usdc_decimals))
+        else:
+            # raw = WHBAR_raw per USDC_raw -> omkeren
+            hbar_per_usdc = raw * (10 ** (self.config.usdc_decimals - self.config.whbar_decimals))
+            return 1.0 / hbar_per_usdc
+
+    def _fee_fraction(self) -> float:
+        return self.config.fee_tier / 1_000_000
+
     def quote_hbar_to_usdc(self, hbar_amount: float) -> float:
+        """
+        (7 sep 2026) Eerst de QuoterV2 proberen; als die weigert (op
+        mainnet structureel), terugvallen op de poolprijs uit slot0 minus
+        de pool-fee. Voor bedragen die klein zijn t.o.v. de pool-
+        liquiditeit is dat verschil met een echte quote verwaarloosbaar;
+        de slippage-tolerantie vangt de rest.
+        """
+        try:
+            return self._quote_hbar_to_usdc_via_quoter(hbar_amount)
+        except Exception as e:
+            print(f"[swap-v2] QuoterV2 weigert ({str(e)[:100]}) -- fallback op poolprijs")
+            return hbar_amount * self._pool_usdc_per_hbar() * (1 - self._fee_fraction())
+
+    def _quote_hbar_to_usdc_via_quoter(self, hbar_amount: float) -> float:
         """
         LET OP (23 aug 2026): gebruikt WHBAR's EIGEN 8-decimalen-conventie
         voor het amountIn-parameter, NIET de 18-decimalen-wei-conventie
@@ -200,6 +273,14 @@ class SwapExecutorV2:
         return amount_out / (10 ** self.config.usdc_decimals)
 
     def quote_usdc_to_hbar(self, usdc_amount: float) -> float:
+        """(7 sep 2026) Zelfde quoter-met-pool-fallback als de HBAR->USDC-kant."""
+        try:
+            return self._quote_usdc_to_hbar_via_quoter(usdc_amount)
+        except Exception as e:
+            print(f"[swap-v2] QuoterV2 weigert ({str(e)[:100]}) -- fallback op poolprijs")
+            return (usdc_amount / self._pool_usdc_per_hbar()) * (1 - self._fee_fraction())
+
+    def _quote_usdc_to_hbar_via_quoter(self, usdc_amount: float) -> float:
         """LET OP (23 aug 2026): amountOut komt terug in WHBAR's eigen 8-decimalen-termen."""
         amount_in_raw = int(usdc_amount * (10 ** self.config.usdc_decimals))
         params = (
@@ -242,7 +323,7 @@ class SwapExecutorV2:
 
         swap_fn = self.router.functions.exactInputSingle(params)
         tx_hash = self.rpc_client.build_and_send_transaction(
-            swap_fn, value_wei=amount_in_wei_for_msg_value
+            swap_fn, value_wei=amount_in_wei_for_msg_value, gas_limit=SWAP_GAS_LIMIT
         )
         receipt = self.rpc_client.wait_for_receipt(tx_hash)
 
@@ -296,7 +377,7 @@ class SwapExecutorV2:
         )
 
         swap_fn = self.router.functions.exactInputSingle(params)
-        tx_hash = self.rpc_client.build_and_send_transaction(swap_fn)
+        tx_hash = self.rpc_client.build_and_send_transaction(swap_fn, gas_limit=SWAP_GAS_LIMIT)
         receipt = self.rpc_client.wait_for_receipt(tx_hash)
 
         if receipt["status"] != "success" or not self.whbar_helper:
@@ -366,4 +447,5 @@ def build_swap_config_v2(network: str = "testnet", fee_tier: int = 3000,
         usdc_decimals=base.usdc_decimals,
         fee_tier=fee_tier,
         slippage_tolerance=slippage_tolerance,
+        factory_address=v2.factory,
     )

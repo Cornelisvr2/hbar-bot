@@ -41,13 +41,20 @@ def main():
     parser.add_argument("--amount", required=True, type=float)
     parser.add_argument("--network", required=True, choices=["testnet", "mainnet"])
     parser.add_argument("--engine", required=True, choices=["v1", "v2"])
-    parser.add_argument("--fee-tier", type=int, default=3000, help="Alleen relevant voor engine=v2")
+    # BUGFIX (7 sep 2026): default was hardgecodeerd 3000 (0,30%) -- op
+    # mainnet bestaat er GEEN WHBAR/USDC-pool op 0,30% (alleen 1500 =
+    # 0,15%), waardoor elke swap die de fee-tier niet meegaf op de
+    # QuoterV2 revertte (hashio: "400 Bad Request"). Default volgt nu
+    # LP_FEE_TIER uit .env, dezelfde bron als de LP-positie zelf.
+    parser.add_argument("--fee-tier", type=int,
+                        default=int(os.environ.get("LP_FEE_TIER", "3000")),
+                        help="Alleen relevant voor engine=v2 (default: LP_FEE_TIER uit .env)")
     parser.add_argument("--slippage", type=float, default=0.01)
     args = parser.parse_args()
 
     logger.info(
         f"Losgekoppeld HBAR-swap-proces gestart: {args.direction} {args.amount} "
-        f"op {args.network} via engine={args.engine}, PID {os.getpid()}"
+        f"op {args.network} via engine={args.engine}, fee_tier={args.fee_tier}, PID {os.getpid()}"
     )
 
     from hedera_rpc_client import HederaRpcClient, NetworkConfig
@@ -110,8 +117,21 @@ def main():
         }))
 
     except Exception as e:
-        logger.error(f"Onverwachte fout in losgekoppeld HBAR-swap-proces: {e}")
-        _notify(f"[HBAR Bot] \u26a0\ufe0f Fout bij swap ({args.direction}, {args.amount}): {e}")
+        # (7 sep 2026) De JSON-RPC-relay (hashio) verpakt een contract-
+        # revert in een HTTP 400; web3's raise_for_status() gooit dan
+        # alleen "400 Client Error: Bad Request" -- de ECHTE reden zit in
+        # de response-body. Die hier expliciet meenemen, anders blijft
+        # elke revert onzichtbaar.
+        detail = str(e)
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            try:
+                detail += f" | body: {resp.text[:400]}"
+            except Exception:
+                pass
+        logger.error(f"Onverwachte fout in losgekoppeld HBAR-swap-proces: {detail}")
+        _notify(f"[HBAR Bot] \u26a0\ufe0f Fout bij swap ({args.direction}, {args.amount}, "
+                f"fee_tier={args.fee_tier}): {detail[:500]}")
         sys.exit(1)
 
 
