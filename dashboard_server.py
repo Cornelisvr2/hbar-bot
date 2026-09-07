@@ -54,7 +54,14 @@ async def _build_dashboard_context() -> dict:
         gecko = GeckoTerminalClient()
         snapshot = gecko.get_pool_snapshot()
         fee_tier = int(os.environ.get("LP_FEE_TIER", "3000"))  # BUGFIX (5 sep 2026, systematische audit): was hardgecodeerd op 3000, ongeacht de daadwerkelijke pool-fee-tier (1500 op mainnet)
-        pool_apr = compute_fees_apr(snapshot.volume_24h_usd, fee_tier, snapshot.liquidity_usd)
+        pool_apr_breed = compute_fees_apr(snapshot.volume_24h_usd, fee_tier, snapshot.liquidity_usd)
+        # (7 sep 2026) Nauwkeurige Fees-APR met SaucerSwap's "balanced
+        # range"-noemer (uit bot_data's pool_metrics); de pool-brede
+        # variant blijft als fallback en ter vergelijking.
+        pm = data.get("pool_metrics")
+        pool_apr = pm["fees_apr_balanced"] if pm else pool_apr_breed
+        lari = pm["lari"] if pm else None
+        lari_realized = data.get("lari_realized")
 
         # Projecties (1 sep 2026, op verzoek) -- dagelijks samengestelde
         # rente op basis van de HUIDIGE pool-APR, zoals besproken: NIET
@@ -207,6 +214,16 @@ async def _build_dashboard_context() -> dict:
             ) if data["position"] else "",
             "hbar_price_eur": data["hbar_price_usd"] * USD_NAAR_EUR,
             "pool_apr_pct": pool_apr * 100,
+            "pool_apr_breed_pct": pool_apr_breed * 100,
+            "tvl_in_range_usd": pm["tvl_in_range_usd"] if pm else None,
+            "lari_pool_apr_pct": lari.pool_reward_apr * 100 if lari else None,
+            "lari_our_apr_pct": lari.our_reward_apr * 100 if lari else None,
+            "lari_our_share_pct": lari.our_liquidity_share * 100 if lari else None,
+            "lari_our_epoch_usd": lari.our_reward_per_epoch_usd if lari else None,
+            "lari_realized_sauce": lari_realized.sauce_received if lari_realized else None,
+            "lari_realized_hbar": lari_realized.hbar_received if lari_realized else None,
+            "lari_realized_count": lari_realized.airdrop_count if lari_realized else None,
+            "total_apr_pct": (pool_apr + (lari.our_reward_apr if lari else 0.0)) * 100,
             "projection_30d": projectie_30d,
             "projection_90d": projectie_90d,
             "projection_180d": projectie_180d,

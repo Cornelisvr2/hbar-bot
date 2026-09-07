@@ -192,6 +192,36 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
     position_value_usd = position_data["value_usd"] if position_data else 0.0
     total_value_usd = wallet_value_usd + position_value_usd
 
+    # (7 sep 2026) Nauwkeurige Fees-APR ("balanced range"-noemer, zoals
+    # SaucerSwap zelf) + LARI-schatting, volledig on-chain. Faalt zacht:
+    # bij een fout blijft pool_metrics None en valt het dashboard terug
+    # op de oude, pool-brede benadering.
+    pool_metrics = None
+    try:
+        from pool_range_analysis import compute_pool_metrics
+        from lp_manager import DEFAULT_TICK_SPACING_BY_FEE
+        _snap = gecko.get_pool_snapshot()
+        pool_metrics = compute_pool_metrics(
+            client.w3, v2.factory, base.whbar_token, quote_address, fee_tier,
+            DEFAULT_TICK_SPACING_BY_FEE.get(fee_tier, 30), base.usdc_decimals,
+            hbar_price_usd, (1.0 if HEDERA_NETWORK == "mainnet" else sauce_price_usd),
+            _snap.volume_24h_usd,
+            our_liquidity=int(liquidity) if positie else 0,  # on-chain gelezen hierboven
+            our_tick_lower=positie["tick_lower"] if positie else None,
+            our_tick_upper=positie["tick_upper"] if positie else None,
+            position_value_usd=position_value_usd,
+        )
+    except Exception as e:
+        print(f"[waarschuwing] pool-metrics (balanced-range APR / LARI) niet beschikbaar: {e}")
+
+    # Gerealiseerde LARI-uitkeringen (airdrops van het LARI-escrow-account).
+    lari_realized = None
+    try:
+        from pool_range_analysis import fetch_realized_lari
+        lari_realized = fetch_realized_lari(_resolve_hedera_account_id(client.address))
+    except Exception as e:
+        print(f"[waarschuwing] gerealiseerde LARI niet beschikbaar: {e}")
+
     huidig_regime = regimestatus["current_regime"] if regimestatus else "lp_mode"
 
     # BUGFIX (3 sep 2026, gevonden na een verwarrende Telegram-melding):
@@ -215,7 +245,24 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
         "current_regime": huidig_regime,
         "current_regime_label": regime_label,
         "total_value_usd": total_value_usd,
+        "pool_metrics": pool_metrics,
+        "lari_realized": lari_realized,
     }
+
+
+def _resolve_hedera_account_id(evm_address: str) -> str:
+    """0x-adres -> 0.0.X via de mirrornode (klein, gecachet)."""
+    import requests
+    if not hasattr(_resolve_hedera_account_id, "_cache"):
+        _resolve_hedera_account_id._cache = {}
+    cache = _resolve_hedera_account_id._cache
+    if evm_address in cache:
+        return cache[evm_address]
+    mirror = "https://mainnet.mirrornode.hedera.com" if HEDERA_NETWORK == "mainnet" else "https://testnet.mirrornode.hedera.com"
+    r = requests.get(f"{mirror}/api/v1/accounts/{evm_address}", timeout=15)
+    r.raise_for_status()
+    cache[evm_address] = r.json()["account"]
+    return cache[evm_address]
 
 
 def get_total_deposits_hbar(account_evm_address: str) -> float:
@@ -291,6 +338,10 @@ def get_total_deposits_hbar(account_evm_address: str) -> float:
             initiator = transaction_id.split("-")[0] if transaction_id else ""
             if initiator == hedera_account_id or initiator in BEKENDE_RELAY_ACCOUNTS:
                 continue  # WIJZELF (rechtstreeks of via de relay) initieerden dit
+            # (7 sep 2026) LARI-airdrops zijn OPBRENGST, geen eigen storting.
+            from pool_range_analysis import LARI_PAYER_ACCOUNTS
+            if initiator in LARI_PAYER_ACCOUNTS:
+                continue
 
             for overdracht in tx.get("transfers", []):
                 if overdracht.get("account") == hedera_account_id and overdracht.get("amount", 0) > 0:

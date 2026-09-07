@@ -1945,6 +1945,44 @@ class RegimeOrchestrator:
         )
         print(f"[regime] Live pool-APR (gemiddeld, hele range): {self._cached_pool_fees_apr*100:.1f}% "
               f"(24u-volume=${pool_snapshot.volume_24h_usd:,.0f}, liquiditeit=${pool_snapshot.liquidity_usd:,.0f})")
+        # (7 sep 2026) Nauwkeurige Fees-APR met SaucerSwap's "balanced
+        # range"-noemer + LARI-schatting, on-chain (max. elke 10 min --
+        # kost een handvol eth_calls). Vervangt de pool-brede benadering
+        # hierboven als bron voor beslissingen zodra beschikbaar.
+        if self.lp_manager and (time.time() - getattr(self, "_pool_metrics_at", 0.0)) > 600:
+            try:
+                from pool_range_analysis import compute_pool_metrics
+                from lp_manager import DEFAULT_TICK_SPACING_BY_FEE
+                cfg = self.lp_manager.config
+                quote = cfg.token1 if cfg.token0.lower() == cfg.whbar_address.lower() else cfg.token0
+                quote_dec = cfg.token1_decimals if cfg.token0.lower() == cfg.whbar_address.lower() else cfg.token0_decimals
+                st = self.lp_manager.state
+                our_L = 0
+                if st.is_open and st.token_id is not None:
+                    try:
+                        our_L = int(self.lp_manager.position_manager.functions.positions(st.token_id).call()[5])
+                    except Exception:
+                        our_L = 0
+                pm = compute_pool_metrics(
+                    self.rpc_client.w3, cfg.factory_address, cfg.whbar_address, quote, cfg.fee_tier,
+                    DEFAULT_TICK_SPACING_BY_FEE.get(cfg.fee_tier, 30), quote_dec,
+                    current_price, (1.0 if HEDERA_NETWORK == "mainnet" else current_price),
+                    pool_snapshot.volume_24h_usd,
+                    our_liquidity=our_L,
+                    our_tick_lower=st.tick_lower if st.is_open else None,
+                    our_tick_upper=st.tick_upper if st.is_open else None,
+                    position_value_usd=0.0,
+                )
+                self._pool_metrics_at = time.time()
+                self._cached_pool_fees_apr = pm["fees_apr_balanced"]
+                lari = pm["lari"]
+                print(f"[regime] Fees-APR (balanced range +-{pm['range_ticks'][1]-pm['tick_current']} ticks): "
+                      f"{pm['fees_apr_balanced']*100:.1f}% (TVL in venster=${pm['tvl_in_range_usd']:,.0f}, "
+                      f"{pm['initialized_ticks']} ticks)"
+                      + (f" | LARI pool-APR {lari.pool_reward_apr*100:.1f}%, ons L-aandeel {lari.our_liquidity_share*100:.3f}%"
+                         f" ≈ ${lari.our_reward_per_epoch_usd:.2f}/epoch" if lari else ""))
+            except Exception as e:
+                print(f"[regime] balanced-range APR niet beschikbaar ({str(e)[:100]}) -- pool-brede APR blijft in gebruik")
 
         # Snelle, prijs-gebaseerde flash-detectie (30 aug 2026, op
         # aangeleverde feedback) -- de sentiment-gebaseerde flash-
