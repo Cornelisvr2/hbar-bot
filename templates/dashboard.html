@@ -377,7 +377,7 @@
       Uitgaande van de huidige pool-APR ({{ "%.1f"|format(d.pool_apr_pct) }}%), dagelijks samengesteld,
       zonder verdere stortingen. Geen garantie — de APR schommelt in de
       praktijk met het handelsvolume, en zegt niets over koersrisico
-      (impermanent loss) op de onderliggende HBAR/SAUCE-posities.
+      (impermanent loss) op de onderliggende HBAR/{{ d.quote_symbol }}-posities.
     </div>
   </div>
 
@@ -410,9 +410,12 @@
     <div class="panel">
       <div class="panel-title">Samenstelling</div>
       <div class="stat-line"><span class="label">Wallet — HBAR</span><span class="val">{{ "%.4f"|format(d.wallet.hbar) }}</span></div>
-      <div class="stat-line"><span class="label">Wallet — SAUCE</span><span class="val">{{ "%.2f"|format(d.wallet.sauce) }}</span></div>
+      <div class="stat-line"><span class="label">Wallet — {{ d.quote_symbol }}</span><span class="val">{{ "%.2f"|format(d.wallet.sauce) }}</span></div>
+      {% if d.network == "mainnet" %}
+      <div class="stat-line"><span class="label">Wallet — SAUCE (LARI)</span><span class="val">{{ "%.2f"|format(d.wallet.lari_sauce) }} <span style="color: var(--text-muted);">(${{ "%.2f"|format(d.wallet.lari_sauce_value_usd) }})</span></span></div>
+      {% endif %}
       <div class="stat-line"><span class="label">Positie — HBAR</span><span class="val">{{ "%.4f"|format(d.position.hbar) if d.position else "—" }}</span></div>
-      <div class="stat-line"><span class="label">Positie — SAUCE</span><span class="val">{{ "%.2f"|format(d.position.sauce) if d.position else "—" }}</span></div>
+      <div class="stat-line"><span class="label">Positie — {{ d.quote_symbol }}</span><span class="val">{{ "%.2f"|format(d.position.sauce) if d.position else "—" }}</span></div>
       <div class="stat-line"><span class="label">Opgebouwde fees</span><span class="val status-ok">${{ "%.2f"|format(d.position.fee_value_usd) if d.position else "0.00" }}</span></div>
     </div>
   </div>
