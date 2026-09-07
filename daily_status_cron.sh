@@ -12,6 +12,6 @@ cd "$(dirname "$0")"
 
 echo "=== Dagelijks statusrapport: $(date) ==="
 
-docker compose exec -T hbar-bot python3 daily_status_report.py
+docker compose exec -T dashboard python3 daily_status_report.py
 
 echo "=== Klaar: $(date) ==="
