@@ -1974,7 +1974,8 @@ class RegimeOrchestrator:
                     position_value_usd=0.0,
                 )
                 self._pool_metrics_at = time.time()
-                self._cached_pool_fees_apr = pm["fees_apr_balanced"]
+                if os.environ.get("FEES_APR_SOURCE", "pool") == "balanced":
+                    self._cached_pool_fees_apr = pm["fees_apr_balanced"]
                 lari = pm["lari"]
                 print(f"[regime] Fees-APR (balanced range +-{pm['range_ticks'][1]-pm['tick_current']} ticks): "
                       f"{pm['fees_apr_balanced']*100:.1f}% (TVL in venster=${pm['tvl_in_range_usd']:,.0f}, "
