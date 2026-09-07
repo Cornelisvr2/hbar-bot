@@ -1,0 +1,191 @@
+From 7fd9e00cfc2e41adeee0e03c11f3bded89debd09 Mon Sep 17 00:00:00 2001
+From: claude <claude@local>
+Date: Mon, 7 Sep 2026 11:58:22 +0000
+Subject: [PATCH] BUGFIX: swap-subprocess kreeg geen fee-tier (default 3000;
+ mainnet-pool is 1500) + cooldown voor swap + RPC-foutbody loggen +
+ SAUCE/USDC-label
+
+---
+ execute_hbar_swap_standalone.py | 28 +++++++++++++++++---
+ regime_orchestrator.py          | 46 ++++++++++++++++++++++++---------
+ 2 files changed, 58 insertions(+), 16 deletions(-)
+
+diff --git a/execute_hbar_swap_standalone.py b/execute_hbar_swap_standalone.py
+index 2d1fae4..a1d81a4 100644
+--- a/execute_hbar_swap_standalone.py
++++ b/execute_hbar_swap_standalone.py
+@@ -41,13 +41,20 @@ def main():
+     parser.add_argument("--amount", required=True, type=float)
+     parser.add_argument("--network", required=True, choices=["testnet", "mainnet"])
+     parser.add_argument("--engine", required=True, choices=["v1", "v2"])
+-    parser.add_argument("--fee-tier", type=int, default=3000, help="Alleen relevant voor engine=v2")
++    # BUGFIX (7 sep 2026): default was hardgecodeerd 3000 (0,30%) -- op
++    # mainnet bestaat er GEEN WHBAR/USDC-pool op 0,30% (alleen 1500 =
++    # 0,15%), waardoor elke swap die de fee-tier niet meegaf op de
++    # QuoterV2 revertte (hashio: "400 Bad Request"). Default volgt nu
++    # LP_FEE_TIER uit .env, dezelfde bron als de LP-positie zelf.
++    parser.add_argument("--fee-tier", type=int,
++                        default=int(os.environ.get("LP_FEE_TIER", "3000")),
++                        help="Alleen relevant voor engine=v2 (default: LP_FEE_TIER uit .env)")
+     parser.add_argument("--slippage", type=float, default=0.01)
+     args = parser.parse_args()
+ 
+     logger.info(
+         f"Losgekoppeld HBAR-swap-proces gestart: {args.direction} {args.amount} "
+-        f"op {args.network} via engine={args.engine}, PID {os.getpid()}"
++        f"op {args.network} via engine={args.engine}, fee_tier={args.fee_tier}, PID {os.getpid()}"
+     )
+ 
+     from hedera_rpc_client import HederaRpcClient, NetworkConfig
+@@ -110,8 +117,21 @@ def main():
+         }))
+ 
+     except Exception as e:
+-        logger.error(f"Onverwachte fout in losgekoppeld HBAR-swap-proces: {e}")
+-        _notify(f"[HBAR Bot] \u26a0\ufe0f Fout bij swap ({args.direction}, {args.amount}): {e}")
++        # (7 sep 2026) De JSON-RPC-relay (hashio) verpakt een contract-
++        # revert in een HTTP 400; web3's raise_for_status() gooit dan
++        # alleen "400 Client Error: Bad Request" -- de ECHTE reden zit in
++        # de response-body. Die hier expliciet meenemen, anders blijft
++        # elke revert onzichtbaar.
++        detail = str(e)
++        resp = getattr(e, "response", None)
++        if resp is not None:
++            try:
++                detail += f" | body: {resp.text[:400]}"
++            except Exception:
++                pass
++        logger.error(f"Onverwachte fout in losgekoppeld HBAR-swap-proces: {detail}")
++        _notify(f"[HBAR Bot] \u26a0\ufe0f Fout bij swap ({args.direction}, {args.amount}, "
++                f"fee_tier={args.fee_tier}): {detail[:500]}")
+         sys.exit(1)
+ 
+ 
+diff --git a/regime_orchestrator.py b/regime_orchestrator.py
+index 2238589..e305626 100644
+--- a/regime_orchestrator.py
++++ b/regime_orchestrator.py
+@@ -331,6 +331,9 @@ class RegimeOrchestrator:
+             os.environ.get("DEPLOY_CAPITAL_COOLDOWN_SECONDS", str(10 * 60))
+         )
+         self._last_capital_deploy_at = 0.0
++        # (7 sep 2026) Naam van de quote-token voor logs/meldingen: op
++        # testnet is dat SAUCE, op mainnet USDC.
++        self._quote_label = "USDC" if HEDERA_NETWORK == "mainnet" else "SAUCE"
+ 
+         # Hysterese-status voor de gematigde-zone-breedte (30 aug 2026,
+         # op verzoek) -- onthoudt of de bot MOMENTEEL in de bredere,
+@@ -962,6 +965,13 @@ class RegimeOrchestrator:
+         except Exception:
+             fresh_price = current_price
+ 
++        # BUGFIX (7 sep 2026): cooldown ZETTEN VOORDAT de voorbereidende
++        # swap start. De fix van 6 sep zette hem pas vlak voor
++        # increaseLiquidity(); mislukte de swap hierboven, dan werd de
++        # functie via 'return' verlaten ZONDER cooldown -- en probeerde de
++        # bot elke cyclus (~60s) opnieuw te swappen.
++        self._last_capital_deploy_at = time.time()
++
+         balanceren_gelukt = await self._ensure_balanced_liquidity_ratio(
+             fresh_price, tick_lower, tick_upper, max_hbar_to_use=excess_hbar
+         )
+@@ -999,10 +1009,9 @@ class RegimeOrchestrator:
+         hbar_raw = int(hbar_balance * BIJSTORT_VEILIGHEIDSMARGE * (10 ** self._hbar_decimals))
+         usdc_raw = int(usdc_balance * BIJSTORT_VEILIGHEIDSMARGE * (10 ** self._usdc_decimals))
+ 
+-        # BUGFIX (6 sep 2026): cooldown ALTIJD zetten, ongeacht succes/
+-        # falen -- voorkomt een herhaal-lus zonder rem bij elke
+-        # mislukking (zelfde patroon als eerder al gerepareerd bij het
+-        # vangnet).
++        # (6 sep 2026, aangevuld 7 sep) cooldown is hierboven al gezet,
++        # VOOR de swap; hier nogmaals zodat de 10 min vanaf de echte
++        # storting tellen.
+         self._last_capital_deploy_at = time.time()
+         try:
+             tx_hash = self.lp_manager.deploy_additional_capital(
+@@ -1012,7 +1021,7 @@ class RegimeOrchestrator:
+                 telegram_notify.send_telegram_message(
+                     f"Overtollig kapitaal automatisch bijgestort in positie "
+                     f"{self.lp_manager.state.token_id}: "
+-                    f"{hbar_balance:.4f} HBAR + {usdc_balance:.2f} SAUCE."
++                    f"{hbar_balance:.4f} HBAR + {usdc_balance:.2f} {self._quote_label}."
+                 )
+             else:
+                 telegram_notify.report_error(
+@@ -1235,7 +1244,7 @@ class RegimeOrchestrator:
+             )
+             telegram_notify.send_telegram_message(
+                 f"LP-positie geherbalanceerd: {hbar_raw/(10**self._hbar_decimals):.4f} HBAR "
+-                f"+ {usdc_raw/(10**self._usdc_decimals):.2f} SAUCE."
++                f"+ {usdc_raw/(10**self._usdc_decimals):.2f} {self._quote_label}."
+                 + (" [Gematigde-zone: bredere range i.p.v. volledig uitstappen.]"
+                    if abs(combined_score_now) >= MODERATE_SENTIMENT_THRESHOLD else "")
+             )
+@@ -1300,7 +1309,7 @@ class RegimeOrchestrator:
+             hbar_raw, usdc_raw, current_price, tick_lower, tick_upper,
+         )
+         print(f"[balans-diagnose] hbar_raw={hbar_raw} ({hbar_balance:.4f} HBAR), "
+-              f"usdc_raw={usdc_raw} ({usdc_balance:.4f} SAUCE), "
++              f"usdc_raw={usdc_raw} ({usdc_balance:.4f} {self._quote_label}), "
+               f"current_price={current_price}, tick_lower={tick_lower}, tick_upper={tick_upper}, "
+               f"richting={richting}, bedrag_raw={bedrag_raw}")
+ 
+@@ -1328,8 +1337,8 @@ class RegimeOrchestrator:
+             usdc_to_swap = bedrag_raw / (10 ** self._usdc_decimals)
+             if usdc_to_swap > usdc_balance:
+                 print(f"[balans-diagnose] Onverwacht: berekend swap-bedrag "
+-                      f"({usdc_to_swap:.4f} SAUCE) overschrijdt de balans "
+-                      f"({usdc_balance:.4f} SAUCE) -- geklemd naar 95%.")
++                      f"({usdc_to_swap:.4f} {self._quote_label}) overschrijdt de balans "
++                      f"({usdc_balance:.4f} {self._quote_label}) -- geklemd naar 95%.")
+                 usdc_to_swap = usdc_balance * 0.95
+             if usdc_to_swap > 1.0:  # ondergrens
+                 swap_gelukt = await self._run_swap_and_log("USDC_TO_HBAR", usdc_to_swap, None)
+@@ -2177,7 +2186,7 @@ class RegimeOrchestrator:
+                         telegram_notify.send_telegram_message(
+                             f"LP-positie geopend (vangnet, na herbalancering, "
+                             f"reserve={reserve_hbar:.2f} HBAR achtergehouden): "
+-                            f"{hbar_to_deploy:.4f} HBAR + {usdc_to_deploy:.2f} SAUCE."
++                            f"{hbar_to_deploy:.4f} HBAR + {usdc_to_deploy:.2f} {self._quote_label}."
+                         )
+                     except Exception as e:
+                         telegram_notify.report_error(
+@@ -2502,13 +2511,26 @@ class RegimeOrchestrator:
+     async def _run_swap_and_log(self, direction: str, amount: float,
+                                   signal_id: Optional[int] = None) -> bool:
+         """Voert een swap uit en logt het resultaat naar Postgres. Geeft True terug bij succes."""
++        # BUGFIX (7 sep 2026): fee-tier EXPLICIET meegeven. Zonder dit
++        # viel het subprocess terug op zijn eigen default (3000), terwijl
++        # de LP-positie in de 1500-pool zit -- op mainnet bestaat er geen
++        # WHBAR/USDC-pool op 3000, dus elke swap revertte op de quoter.
++        fee_tier = (self.lp_manager.config.fee_tier if self.lp_manager
++                    else int(os.environ.get("LP_FEE_TIER", "3000")))
+         result = subprocess.run(
+             ["python3", "execute_hbar_swap_standalone.py",
+              "--direction", direction, "--amount", str(amount),
+-             "--network", HEDERA_NETWORK, "--engine", "v2"],
++             "--network", HEDERA_NETWORK, "--engine", "v2",
++             "--fee-tier", str(fee_tier)],
+             capture_output=True, text=True,
+         )
+         status = "success" if result.returncode == 0 else "failed"
++        # (7 sep 2026) Subprocess-uitvoer ALTIJD naar stdout -- voorheen
++        # ging een swap-fout alleen naar Telegram en stond er niets in de
++        # docker-logs.
++        print(f"[swap] {direction} {amount:.4f} fee_tier={fee_tier} -> {status}")
++        if result.stderr.strip():
++            print("[swap] stderr: " + result.stderr.strip()[-800:])
+ 
+         # Gestructureerde output parsen (23 aug 2026 toegevoegd aan
+         # execute_hbar_swap_standalone.py) -- zonder dit werden tx_hash en
+@@ -2536,7 +2558,7 @@ class RegimeOrchestrator:
+ 
+         if status == "failed":
+             telegram_notify.report_error(
+-                "regime_loop: swap", f"Swap {direction} ({amount:.4f}) mislukt: {result.stderr[:200]}"
++                "regime_loop: swap", f"Swap {direction} ({amount:.4f}) mislukt: {result.stderr[-400:]}"
+             )
+         else:
+             # Pauze na een succesvolle swap (26 aug 2026) -- deze swap
+-- 
+2.43.0
