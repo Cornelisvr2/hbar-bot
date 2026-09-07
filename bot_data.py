@@ -188,7 +188,23 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
             "fee_hbar": fee_hbar, "fee_sauce": fee_sauce, "fee_value_usd": fee_waarde_usd,
         }
 
-    wallet_value_usd = hbar_balance * hbar_price_usd + sauce_balance * sauce_price_usd
+    # (7 sep 2026) Echte SAUCE (LARI-rewards) apart lezen en meetellen --
+    # `sauce_balance` hierboven is historisch de QUOTE-token (USDC op mainnet).
+    lari_sauce_balance = 0.0
+    lari_sauce_price_usd = 0.0
+    if HEDERA_NETWORK == "mainnet":
+        try:
+            from sauce_reinvest import SAUCE_TOKEN_EVM, SAUCE_DECIMALS
+            from pool_range_analysis import fetch_sauce_price_usd
+            _sc = client.w3.eth.contract(address=SAUCE_TOKEN_EVM, abi=ERC20_ABI)
+            lari_sauce_balance = _sc.functions.balanceOf(client.address).call() / (10 ** SAUCE_DECIMALS)
+            if lari_sauce_balance > 0:
+                lari_sauce_price_usd = fetch_sauce_price_usd()
+        except Exception as e:
+            print(f"[waarschuwing] SAUCE-balans niet beschikbaar: {e}")
+    lari_sauce_value_usd = lari_sauce_balance * lari_sauce_price_usd
+
+    wallet_value_usd = hbar_balance * hbar_price_usd + sauce_balance * sauce_price_usd + lari_sauce_value_usd
     position_value_usd = position_data["value_usd"] if position_data else 0.0
     total_value_usd = wallet_value_usd + position_value_usd
 
@@ -238,7 +254,8 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
         "hbar_price_usd": hbar_price_usd,
         "sauce_price_usd": sauce_price_usd,
         "pool_price_sauce_per_hbar": pool_price_sauce_per_hbar,
-        "wallet": {"hbar": hbar_balance, "sauce": sauce_balance, "value_usd": wallet_value_usd},
+        "wallet": {"hbar": hbar_balance, "sauce": sauce_balance, "value_usd": wallet_value_usd,
+                   "lari_sauce": lari_sauce_balance, "lari_sauce_value_usd": lari_sauce_value_usd},
         "wallet_address": client.address,
         "whbar_stuck": whbar_stuck,
         "position": position_data,

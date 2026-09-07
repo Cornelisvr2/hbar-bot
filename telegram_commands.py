@@ -76,9 +76,25 @@ async def check_for_commands(state: BotCommandState, regime_orchestrator) -> Non
             _reply(token, chat_id, _format_status(state, regime_orchestrator))
         elif text == "/balance":
             _reply(token, chat_id, _format_balance(regime_orchestrator))
+        elif text == "/sauce":
+            r = getattr(regime_orchestrator, "sauce_reinvestor", None)
+            if not r:
+                _reply(token, chat_id, "SAUCE-herinvesteer-module niet geladen.")
+            else:
+                d = r.evaluate()
+                _reply(token, chat_id,
+                       f"SAUCE: {d.sauce_balance:.2f} (${d.value_usd:.2f}), {d.held_days:.1f} dagen in wallet. "
+                       f"Automatisch: {'AAN' if r.cfg.enabled else 'UIT'}. Beoordeling: {d.reason}")
+        elif text == "/swapsauce":
+            r = getattr(regime_orchestrator, "sauce_reinvestor", None)
+            if not r:
+                _reply(token, chat_id, "SAUCE-herinvesteer-module niet geladen.")
+            else:
+                _reply(token, chat_id, "SAUCE -> HBAR wordt nu geforceerd...")
+                await r.maybe_run(True, force=True)
         elif text.startswith("/"):
             _reply(token, chat_id, "Onbekend commando. Beschikbaar: /status, /pause, "
-                                     "/resume, /balance")
+                                     "/resume, /balance, /sauce, /swapsauce")
         # Overige commando's (bv. voor een andere bot in dezelfde chat)
         # bewust NEGEREN -- geen "onbekend commando"-ruis voor iets dat
         # niet voor deze bot bedoeld was.

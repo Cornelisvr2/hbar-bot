@@ -1,5 +1,5 @@
 """
-regime_orchestrator.py
+regime_orchestrator V2.py
 
 Vervangt TradingOrchestrator + LpOrchestrator voor het SAMENGEVOEGDE
 kapitaal (EUR 2.000) met een alles-of-niets regime-schakelaar:
@@ -443,6 +443,16 @@ class RegimeOrchestrator:
     async def run_forever(self):
         import telegram_commands
         command_state = telegram_commands.BotCommandState()
+        # (7 sep 2026) LARI-SAUCE herinvesteren -- standaard uit, zie sauce_reinvest.py
+        try:
+            from sauce_reinvest import SauceReinvestor
+            self.sauce_reinvestor = SauceReinvestor(self.rpc_client, self.geckoterminal)
+            print(f"[sauce] herinvesteren {'AAN' if self.sauce_reinvestor.cfg.enabled else 'UIT'} "
+                  f"(min ${self.sauce_reinvestor.cfg.min_usd:.0f}, MA {self.sauce_reinvestor.cfg.ma_days}d, "
+                  f"max {self.sauce_reinvestor.cfg.max_hold_days}d)")
+        except Exception as e:
+            self.sauce_reinvestor = None
+            print(f"[sauce] herinvesteer-module niet geladen: {e}")
 
         await self._reconcile_regime_state_on_startup()
         await self._reconcile_lp_position_on_startup()
@@ -469,6 +479,11 @@ class RegimeOrchestrator:
         while True:
             try:
                 await telegram_commands.check_for_commands(command_state, self)
+                if self.sauce_reinvestor and not command_state.paused:
+                    try:
+                        await self.sauce_reinvestor.maybe_run(self.current_regime == Regime.LP_MODE)
+                    except Exception as e:
+                        print(f"[sauce] fout: {e}")
                 if command_state.paused:
                     print("[regime] Gepauzeerd via Telegram -- cyclus overgeslagen.")
                 else:

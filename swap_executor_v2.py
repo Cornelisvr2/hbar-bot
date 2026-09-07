@@ -422,6 +422,58 @@ class SwapExecutorV2:
         tx_hash = self.rpc_client.build_and_send_transaction(approve_fn)
         self.rpc_client.wait_for_receipt(tx_hash)
 
+    # ------------------------------------------------------------------
+    # (7 sep 2026) Generiek: willekeurig HTS-token -> HBAR. Gebouwd voor het
+    # herinvesteren van LARI-SAUCE (sauce_reinvest.py). Zelfde, bewezen
+    # recept als swap_usdc_to_hbar(): approve -> exactInputSingle naar de
+    # eigen wallet -> approve WhbarHelper -> unwrapWhbar. Min-out uit de
+    # poolprijs (slot0) i.p.v. de quoter.
+    # ------------------------------------------------------------------
+    def swap_token_to_hbar(self, token_address: str, token_decimals: int, amount: float,
+                           fee_tier: int) -> SwapResultV2:
+        from swap_executor import ERC20_ABI
+        token = self.rpc_client.w3.eth.contract(address=token_address, abi=ERC20_ABI)
+        amount_raw = int(amount * (10 ** token_decimals))
+
+        # Poolprijs: token1_raw per token0_raw uit slot0, omgezet naar WHBAR per token
+        factory = self.rpc_client.w3.eth.contract(address=self.config.factory_address, abi=_FACTORY_GETPOOL_ABI)
+        pool_addr = factory.functions.getPool(token_address, self.config.whbar_address, fee_tier).call()
+        if int(pool_addr, 16) == 0:
+            raise RuntimeError(f"Geen pool voor token/WHBAR op fee_tier={fee_tier}")
+        pool = self.rpc_client.w3.eth.contract(address=pool_addr, abi=_POOL_SLOT0_ABI)
+        raw = (pool.functions.slot0().call()[0] / (2 ** 96)) ** 2
+        token_is_token0 = int(token_address, 16) < int(self.config.whbar_address, 16)
+        whbar_raw_per_token_raw = raw if token_is_token0 else (1.0 / raw)
+        est_out_raw = int(amount_raw * whbar_raw_per_token_raw * (1 - fee_tier / 1_000_000))
+        min_out_raw = self._apply_slippage(est_out_raw)
+        estimated_hbar = est_out_raw / (10 ** self.config.whbar_decimals)
+
+        approve_fn = token.functions.approve(self.config.swap_router_address, amount_raw)
+        self.rpc_client.wait_for_receipt(self.rpc_client.build_and_send_transaction(approve_fn))
+        time.sleep(2)
+
+        params = (token_address, self.config.whbar_address, fee_tier, self.rpc_client.address,
+                  self._deadline(), amount_raw, min_out_raw, 0)
+        swap_fn = self.router.functions.exactInputSingle(params)
+        tx_hash = self.rpc_client.build_and_send_transaction(swap_fn, gas_limit=SWAP_GAS_LIMIT)
+        receipt = self.rpc_client.wait_for_receipt(tx_hash)
+        result = SwapResultV2(tx_hash=tx_hash, status=receipt["status"], amount_in=amount,
+                              estimated_amount_out=estimated_hbar, direction="TOKEN_TO_HBAR",
+                              fee_tier=fee_tier)
+        if receipt["status"] != "success" or not self.whbar_helper:
+            return result
+
+        whbar_balance_raw = self.whbar_token.functions.balanceOf(self.rpc_client.address).call()
+        if whbar_balance_raw == 0:
+            return result
+        approve_fn = self.whbar_token.functions.approve(self.config.whbar_helper_address, whbar_balance_raw)
+        self.rpc_client.wait_for_receipt(self.rpc_client.build_and_send_transaction(approve_fn))
+        time.sleep(2)
+        unwrap_fn = self.whbar_helper.functions.unwrapWhbar(whbar_balance_raw)
+        self.rpc_client.wait_for_receipt(self.rpc_client.build_and_send_transaction(unwrap_fn, gas_limit=1_000_000))
+        return result
+
+
 def build_swap_config_v2(network: str = "testnet", fee_tier: int = 3000,
                           slippage_tolerance: float = 0.01) -> SwapConfigV2:
     from config import (

@@ -213,6 +213,7 @@ async def _build_dashboard_context() -> dict:
                 data["position"]["range_status"], ""
             ) if data["position"] else "",
             "hbar_price_eur": data["hbar_price_usd"] * USD_NAAR_EUR,
+            "quote_symbol": "USDC" if HEDERA_NETWORK == "mainnet" else "SAUCE",
             "pool_apr_pct": pool_apr * 100,
             "pool_apr_breed_pct": pool_apr_breed * 100,
             "tvl_in_range_usd": pm["tvl_in_range_usd"] if pm else None,
