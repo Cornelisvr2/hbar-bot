@@ -241,20 +241,32 @@ class LariRealized:
     last_timestamp: Optional[float]
 
 
+# Niet verder terugkijken dan het moment waarop we voor het eerst LARI
+# konden verdienen (eerste mainnet-positie: 4 sep 2026). Instelbaar.
+LARI_SCAN_FROM_TS = float(os.environ.get("LARI_SCAN_FROM_TS", "1788480000"))  # 2026-09-04 00:00 UTC
+_lari_cache: dict = {}
+
+
 def fetch_realized_lari(account_id: str, mirror_base: str = "https://mainnet.mirrornode.hedera.com",
-                        max_pages: int = 20) -> LariRealized:
+                        max_pages: int = 10, ttl_seconds: int = 600) -> LariRealized:
     """
     Telt alle SAUCE- en HBAR-credits op ons account op die door een van
     de LARI-payer-accounts zijn geinitieerd (transaction_id begint met dat
     account). Dezelfde payer-lijst wordt door bot_data.get_total_deposits_
     hbar() gebruikt om deze credits NIET als eigen storting te tellen.
+    (7 sep 2026, review) Gecachet (10 min) en begrensd in tijd/pagina's --
+    werd bij elke dashboard-load en elk uur-snapshot volledig herlezen.
     """
+    import time
     import requests
+    hit = _lari_cache.get(account_id)
+    if hit and time.time() - hit[0] < ttl_seconds:
+        return hit[1]
     sauce = 0.0
     hbar = 0.0
     count = 0
     last_ts = None
-    url = f"{mirror_base}/api/v1/transactions?account.id={account_id}&limit=100&order=desc"
+    url = f"{mirror_base}/api/v1/transactions?account.id={account_id}&limit=100&order=desc&timestamp=gte:{LARI_SCAN_FROM_TS:.0f}"
     for _ in range(max_pages):
         r = requests.get(url, timeout=20)
         r.raise_for_status()
@@ -280,7 +292,9 @@ def fetch_realized_lari(account_id: str, mirror_base: str = "https://mainnet.mir
         if not nxt:
             break
         url = mirror_base + nxt
-    return LariRealized(sauce, hbar, count, last_ts)
+    result = LariRealized(sauce, hbar, count, last_ts)
+    _lari_cache[account_id] = (time.time(), result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +322,9 @@ def fetch_sauce_price_usd(ttl_seconds: int = 300) -> float:
 # ---------------------------------------------------------------------------
 # Alles-in-een helper voor bot, dashboard en Telegram-rapport
 # ---------------------------------------------------------------------------
+_pool_metrics_cache: dict = {}
+
+
 def compute_pool_metrics(w3, factory_address: str, whbar_address: str, quote_address: str,
                          fee_tier: int, tick_spacing: int, quote_decimals: int,
                          hbar_price_usd: float, quote_price_usd: float, volume_24h_usd: float,
@@ -320,14 +337,24 @@ def compute_pool_metrics(w3, factory_address: str, whbar_address: str, quote_add
       lari (LariEstimate) -- of lari=None als er geen SAUCE-prijs is.
     quote_address is USDC op mainnet (SAUCE op testnet); whbar_decimals=8.
     """
-    factory_abi = [{"name": "getPool", "type": "function", "stateMutability": "view",
-                    "inputs": [{"name": "a", "type": "address"}, {"name": "b", "type": "address"},
-                               {"name": "fee", "type": "uint24"}],
-                    "outputs": [{"name": "pool", "type": "address"}]}]
-    factory = w3.eth.contract(address=factory_address, abi=factory_abi)
-    pool_address = factory.functions.getPool(whbar_address, quote_address, fee_tier).call()
-    if int(pool_address, 16) == 0:
-        raise RuntimeError(f"Geen pool voor fee_tier={fee_tier}")
+    import time
+    # (7 sep 2026, review) 5 min cache op de tick-walk (~60 eth_calls);
+    # de LARI-schatting wordt wel steeds vers berekend uit de gecachete
+    # pool-toestand, want die hangt af van onze eigen positie/prijzen.
+    cache_key = (whbar_address.lower(), quote_address.lower(), fee_tier)
+    hit = _pool_metrics_cache.get(cache_key)
+    if hit and time.time() - hit[0] < 300:
+        pool_address, rng = hit[1]
+    else:
+        factory_abi = [{"name": "getPool", "type": "function", "stateMutability": "view",
+                        "inputs": [{"name": "a", "type": "address"}, {"name": "b", "type": "address"},
+                                   {"name": "fee", "type": "uint24"}],
+                        "outputs": [{"name": "pool", "type": "address"}]}]
+        factory = w3.eth.contract(address=factory_address, abi=factory_abi)
+        pool_address = factory.functions.getPool(whbar_address, quote_address, fee_tier).call()
+        if int(pool_address, 16) == 0:
+            raise RuntimeError(f"Geen pool voor fee_tier={fee_tier}")
+        rng = None
 
     whbar_is_token0 = int(whbar_address, 16) < int(quote_address, 16)
     if whbar_is_token0:
@@ -335,7 +362,9 @@ def compute_pool_metrics(w3, factory_address: str, whbar_address: str, quote_add
     else:
         t0_dec, t1_dec, p0, p1 = quote_decimals, 8, quote_price_usd, hbar_price_usd
 
-    rng = compute_balanced_range_tvl(w3, pool_address, fee_tier, tick_spacing, t0_dec, t1_dec, p0, p1)
+    if rng is None:
+        rng = compute_balanced_range_tvl(w3, pool_address, fee_tier, tick_spacing, t0_dec, t1_dec, p0, p1)
+        _pool_metrics_cache[cache_key] = (time.time(), (pool_address, rng))
     fees_apr = compute_fees_apr_balanced(volume_24h_usd, fee_tier, rng.tvl_in_range_usd)
 
     lari = None
