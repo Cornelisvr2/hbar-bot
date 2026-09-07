@@ -2439,7 +2439,11 @@ class RegimeOrchestrator:
     # NOOIT bewust ingezet als positie-kapitaal (dat principe blijft
     # onveranderd), dit vergroot alleen de marge voor wat het netwerk
     # vooraf kan blokkeren.
-    MIN_GAS_RESERVE_HBAR = 100.0
+    # (7 sep 2026, op verzoek) Ondergrens van wat ALTIJD als native HBAR in
+    # de wallet blijft: nooit geswapt, nooit bijgestort, alleen voor gas/
+    # fees. Instelbaar via .env; zelfde default als het vangnet-pad
+    # (LP_SAFETYNET_MIN_RESERVE_HBAR).
+    MIN_GAS_RESERVE_HBAR = float(os.environ.get("MIN_GAS_RESERVE_HBAR", "50.0"))
 
     def _get_swappable_hbar_balance(self, current_price: float) -> float:
         """

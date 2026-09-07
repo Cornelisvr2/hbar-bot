@@ -1,3 +1,9 @@
 187-124-8-211.sslip.io {
+    # (7 sep 2026) SSE-stream voor het live-logpaneel: niet bufferen
+    handle /api/logs/stream {
+        reverse_proxy dashboard:8000 {
+            flush_interval -1
+        }
+    }
     reverse_proxy dashboard:8000
 }

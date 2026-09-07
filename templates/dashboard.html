@@ -291,6 +291,24 @@
     margin-top: 32px;
     font-family: var(--mono);
   }
+  /* --- Live-log --- */
+  .log-toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .log-toolbar button {
+    font-family: var(--mono); font-size: 12px; padding: 4px 10px;
+    background: var(--surface-raised); color: var(--text-muted);
+    border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+  }
+  .log-toolbar button.active { color: var(--text); border-color: var(--gain); }
+  .log-status { font-family: var(--mono); font-size: 12px; color: var(--text-muted); margin-left: auto; }
+  .log-box {
+    font-family: var(--mono); font-size: 12px; line-height: 1.45;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; height: 340px; overflow-y: auto; white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log-box .l-swap { color: var(--gain); }
+  .log-box .l-err { color: var(--loss); }
+  .log-box .l-dim { color: var(--text-muted); }
 </style>
 </head>
 <body>
@@ -432,6 +450,19 @@
     {% endif %}
   </div>
 
+  <div class="panel">
+    <div class="panel-title">Live-log</div>
+    <div class="log-toolbar">
+      <button class="active" data-filter="">alles</button>
+      <button data-filter="[regime]">regime</button>
+      <button data-filter="[swap]">swap</button>
+      <button data-filter="[balans-diagnose]">balans</button>
+      <button data-filter="FOUT">fouten</button>
+      <span class="log-status" id="logStatus">verbinden…</span>
+    </div>
+    <div class="log-box" id="logBox"></div>
+  </div>
+
   <footer>Bijgewerkt: {{ d.generated_at }}</footer>
 
 </div>
@@ -539,6 +570,49 @@
     details.style.display = zichtbaar ? 'none' : 'block';
     knop.textContent = zichtbaar ? 'Toon details' : 'Verberg details';
   }
+
+  // --- Live-log (7 sep 2026) ---
+  (function () {
+    const box = document.getElementById('logBox');
+    const status = document.getElementById('logStatus');
+    const MAX_LINES = 600;
+    let filter = '';
+    const lines = [];
+
+    function cls(line) {
+      if (line.includes('FOUT') || line.includes('mislukt') || line.includes('Traceback') || line.includes('Error')) return 'l-err';
+      if (line.includes('[swap')) return 'l-swap';
+      if (line.includes('DEBUG-vangnet') || line.includes('Live pool-APR')) return 'l-dim';
+      return '';
+    }
+    function render() {
+      const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+      box.innerHTML = lines
+        .filter(l => !filter || l.includes(filter))
+        .map(l => `<div class="${cls(l)}">${l.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`)
+        .join('');
+      if (atBottom) box.scrollTop = box.scrollHeight;
+    }
+    function push(line) {
+      lines.push(line);
+      if (lines.length > MAX_LINES) lines.shift();
+    }
+    document.querySelectorAll('.log-toolbar button').forEach(b => b.addEventListener('click', () => {
+      document.querySelectorAll('.log-toolbar button').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      filter = b.dataset.filter;
+      render();
+      box.scrollTop = box.scrollHeight;
+    }));
+
+    fetch('/api/logs?tail=300').then(r => r.json()).then(d => {
+      d.lines.forEach(push); render(); box.scrollTop = box.scrollHeight;
+      const es = new EventSource('/api/logs/stream');
+      es.onopen = () => { status.textContent = 'live'; };
+      es.onmessage = e => { push(e.data); render(); };
+      es.onerror = () => { status.textContent = 'verbinding verbroken — opnieuw…'; };
+    }).catch(() => { status.textContent = 'log niet beschikbaar'; });
+  })();
 </script>
 </body>
 </html>

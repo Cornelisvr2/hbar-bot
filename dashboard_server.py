@@ -14,8 +14,11 @@ import datetime
 import time
 import os
 
+import asyncio
+from collections import deque
+
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from jinja2 import Environment, FileSystemLoader
 
 from bot_data import fetch_dashboard_data, STRATEGIE_NAMEN, HEDERA_NETWORK, get_total_deposits_hbar
@@ -325,3 +328,60 @@ def _build_price_chart_data(days: int) -> dict:
 @app.get("/api/price-history")
 async def api_price_history(days: int = 1):
     return JSONResponse(_build_price_chart_data(days))
+
+
+# ---------------------------------------------------------------------------
+# Live-logpaneel (7 sep 2026): de bot tee't zijn stdout naar ./logs/bot.log
+# (zie main_orchestrator.py); het dashboard heeft die map read-only.
+# ---------------------------------------------------------------------------
+BOT_LOG_FILE = os.environ.get("BOT_LOG_FILE", "/app/logs/bot.log")
+
+
+def _tail_lines(path: str, n: int) -> list[str]:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return list(deque(f, maxlen=n))
+    except FileNotFoundError:
+        return []
+
+
+@app.get("/api/logs")
+async def api_logs(tail: int = 200):
+    tail = max(1, min(tail, 2000))
+    return JSONResponse({"lines": [l.rstrip("\n") for l in _tail_lines(BOT_LOG_FILE, tail)]})
+
+
+@app.get("/api/logs/stream")
+async def api_logs_stream():
+    async def gen():
+        # Begin aan het EINDE van het bestand: de eerste vulling komt via
+        # /api/logs; deze stream levert alleen nieuwe regels.
+        try:
+            f = open(BOT_LOG_FILE, "r", encoding="utf-8", errors="replace")
+            f.seek(0, 2)
+        except FileNotFoundError:
+            f = None
+        inode = os.stat(BOT_LOG_FILE).st_ino if f else None
+        idle = 0
+        while True:
+            line = f.readline() if f else ""
+            if line:
+                idle = 0
+                yield f"data: {line.rstrip()}\n\n"
+                continue
+            await asyncio.sleep(0.5)
+            idle += 1
+            # Rotatie of nog-niet-bestaand bestand afhandelen
+            try:
+                st = os.stat(BOT_LOG_FILE)
+                if f is None or st.st_ino != inode:
+                    if f:
+                        f.close()
+                    f = open(BOT_LOG_FILE, "r", encoding="utf-8", errors="replace")
+                    inode = st.st_ino
+            except FileNotFoundError:
+                pass
+            if idle % 30 == 0:
+                yield ": keepalive\n\n"  # houdt de verbinding door Caddy heen open
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

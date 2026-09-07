@@ -496,5 +496,66 @@ async def main():
     )
 
 
+class _TeeToLogFile:
+    """
+    (7 sep 2026) Schrijft alles wat naar stdout/stderr gaat OOK naar een
+    logbestand op de gedeelde ./logs-map, met tijdstempel en simpele
+    rotatie. De bot logt overal via print(); docker-logs blijven gewoon
+    werken (we geven alles door aan de originele stream), maar het
+    dashboard kan het bestand nu live tailen.
+    """
+
+    def __init__(self, original, path: str, max_bytes: int = 5_000_000, backups: int = 3):
+        self._orig = original
+        self._path = path
+        self._max = max_bytes
+        self._backups = backups
+        self._at_line_start = True
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._f = open(path, "a", buffering=1, encoding="utf-8")
+
+    def _rotate_if_needed(self):
+        try:
+            if self._f.tell() < self._max:
+                return
+            self._f.close()
+            for i in range(self._backups - 1, 0, -1):
+                src, dst = f"{self._path}.{i}", f"{self._path}.{i + 1}"
+                if os.path.exists(src):
+                    os.replace(src, dst)
+            os.replace(self._path, f"{self._path}.1")
+            self._f = open(self._path, "a", buffering=1, encoding="utf-8")
+        except Exception:
+            pass
+
+    def write(self, data):
+        self._orig.write(data)
+        try:
+            for chunk in data.splitlines(keepends=True):
+                if self._at_line_start:
+                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self._f.write(f"{ts} ")
+                self._f.write(chunk)
+                self._at_line_start = chunk.endswith("\n")
+            self._rotate_if_needed()
+        except Exception:
+            pass
+
+    def flush(self):
+        self._orig.flush()
+        try:
+            self._f.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._orig, name)
+
+
 if __name__ == "__main__":
+    import datetime
+    import sys
+    _log_path = os.environ.get("BOT_LOG_FILE", "/app/logs/bot.log")
+    sys.stdout = _TeeToLogFile(sys.stdout, _log_path)
+    sys.stderr = _TeeToLogFile(sys.stderr, _log_path)
     asyncio.run(main())
