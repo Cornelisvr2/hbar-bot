@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 logs/
 node_modules/
+calibration_examples.json
+*.log
+mainnet_migratieplan.md
