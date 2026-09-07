@@ -114,19 +114,34 @@ class SauceReinvestor:
         return best
 
     def _price_series_in_hbar(self, days: int) -> tuple[Optional[float], Optional[float]]:
-        """(huidige SAUCE-in-HBAR, gemiddelde over `days` dagen) via GeckoTerminal."""
+        """
+        (huidige SAUCE-in-HBAR, gemiddelde over `days` dagen).
+
+        BUGFIX (7 sep 2026, gevonden bij review): GeckoTerminal's OHLCV
+        is de prijs van het BASE-token van de pool. Welke kant base is
+        (SAUCE of WHBAR) staat in de pool-metadata; met currency=token
+        krijgen we de verhouding rechtstreeks, en keren we om als WHBAR
+        de base is. Zo is de reeks altijd "HBAR per SAUCE".
+        """
+        import requests
+        from geckoterminal_client import GECKOTERMINAL_BASE_URL, HEDERA_NETWORK_ID
         from pool_range_analysis import fetch_sauce_price_usd
         pool = self._sauce_pool_address()
         if not pool:
             return None, None
-        sauce_candles = self.gecko.get_historical_ohlcv(pool_address=pool, timeframe="day", limit=days + 1)
-        hbar_candles = self.gecko.get_historical_ohlcv(timeframe="day", limit=days + 1)
-        hbar_by_day = {c.timestamp // 86400: c.close for c in hbar_candles}
+        base_url = f"{GECKOTERMINAL_BASE_URL}/networks/{HEDERA_NETWORK_ID}/pools/{pool}"
+        meta = requests.get(base_url, timeout=15)
+        meta.raise_for_status()
+        base_id = meta.json()["data"]["relationships"]["base_token"]["data"]["id"].lower()
+        sauce_is_base = SAUCE_TOKEN_EVM.lower() in base_id
+        r = requests.get(f"{base_url}/ohlcv/day", params={"limit": days + 1, "currency": "token"}, timeout=15)
+        r.raise_for_status()
+        candles = r.json()["data"]["attributes"]["ohlcv_list"]
         ratios = []
-        for c in sauce_candles[:days]:
-            h = hbar_by_day.get(c.timestamp // 86400)
-            if h and h > 0:
-                ratios.append(c.close / h)
+        for c in candles[:days]:
+            close = float(c[4])
+            if close > 0:
+                ratios.append(close if sauce_is_base else 1.0 / close)
         if not ratios:
             return None, None
         current = fetch_sauce_price_usd() / self.gecko.get_pool_snapshot().price_usd
