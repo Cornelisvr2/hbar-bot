@@ -246,7 +246,10 @@ class RegimeOrchestrator:
         # eerder vandaag empirisch gemeten HBAR-uurvolatiliteit, totdat de
         # eerste verversing draait.
         self._cached_hourly_volatility = 0.006072
-        self._cached_macro_regime = "sideways"
+        # (7 sep 2026) Start op None i.p.v. "sideways": de eerste meting na
+        # een herstart is geen "wijziging", en gaf tot nu toe bij ELKE
+        # herstart een valse "sideways -> bull"-melding op Telegram.
+        self._cached_macro_regime = None
         self._last_economic_gate_notification_at = 0.0
 
         # Volatiliteit-kalibratiefactor (28 aug 2026) -- ingeladen bij het
@@ -1023,6 +1026,17 @@ class RegimeOrchestrator:
                     f"{self.lp_manager.state.token_id}: "
                     f"{hbar_balance:.4f} HBAR + {usdc_balance:.2f} {self._quote_label}."
                 )
+                # (7 sep 2026) increaseLiquidity() gebruikt nooit exact het
+                # gewrapte bedrag (0,5% approve-marge + afronding); het
+                # restje bleef als WHBAR staan tot de volgende HERSTART.
+                # Nu direct terughalen naar native HBAR.
+                try:
+                    time.sleep(2)
+                    recovered = self.lp_manager.check_and_recover_stuck_whbar()
+                    if recovered:
+                        print(f"[bijstorten] WHBAR-restje van {recovered:.4f} na bijstorten teruggehaald")
+                except Exception as e:
+                    print(f"[bijstorten] WHBAR-restje terughalen mislukt: {e}")
             else:
                 telegram_notify.report_error(
                     "regime_loop: kapitaal bijstorten",
@@ -1518,7 +1532,7 @@ class RegimeOrchestrator:
             oude_macro_regime = self._cached_macro_regime
             self._cached_macro_regime = macro_result.regime.value
 
-            if self._cached_macro_regime != oude_macro_regime:
+            if oude_macro_regime is not None and self._cached_macro_regime != oude_macro_regime:
                 telegram_notify.send_telegram_message(
                     f"Macro-regime gewijzigd: {oude_macro_regime} -> "
                     f"{self._cached_macro_regime} (momentum={macro_result.momentum_pct*100:+.1f}% "
