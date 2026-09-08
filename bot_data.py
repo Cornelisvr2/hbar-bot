@@ -7,6 +7,8 @@
 # dat de twee uit elkaar gaan lopen).
 
 import os
+import time
+from typing import Optional
 
 from hedera_rpc_client import HederaRpcClient, NetworkConfig
 from config import (
@@ -151,6 +153,22 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
             print(f"[waarschuwing] Kon opgebouwde fees niet opvragen: {e}")
             fee_hbar, fee_sauce = 0.0, 0.0
         fee_waarde_usd = fee_hbar * hbar_price_usd + fee_sauce * sauce_price_usd
+
+        # (8 sep 2026) Gerealiseerde Fees-APR: de fees die de positie
+        # WERKELIJK heeft aangetrokken (tokensOwed via collect()-simulatie)
+        # gedeeld door positiewaarde en looptijd. Kalibratiebron voor alle
+        # berekende APR's. Looptijd = aanmaak van de positie-NFT (mirrornode).
+        # Indicatief: bijstortingen onderweg vertekenen het.
+        positie_open_ts = None
+        gerealiseerde_fees_apr = None
+        try:
+            positie_open_ts = _position_nft_created_ts(positie["token_id"])
+            if positie_open_ts:
+                dagen = (time.time() - positie_open_ts) / 86400
+                if dagen >= 0.25 and positie_waarde_usd > 0:
+                    gerealiseerde_fees_apr = fee_waarde_usd / positie_waarde_usd / dagen * 365
+        except Exception as e:
+            print(f"[waarschuwing] gerealiseerde Fees-APR niet beschikbaar: {e}")
         # Canonieke prijsgrenzen berekenen (consistent met de canonieke
         # ticks), pas daarna terugrekenen naar mensvriendelijke schaal --
         # omkeren wisselt ook welke grens "onder" en welke "boven" is.
@@ -162,6 +180,13 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
             )
         else:
             positie_in_range_pct = 50.0
+        # BUGFIX (8 sep 2026): in_range_pct werd in CANONIEKE volgorde
+        # berekend; op mainnet (USDC=token0) is canoniek omgekeerd aan de
+        # mensvriendelijke USD/HBAR-schaal, waardoor de marker en het
+        # percentage aan de verkeerde kant stonden (87,8% terwijl de prijs
+        # 12% boven de ONDERrand zat). Nu altijd: 0% = onderrand (USD/HBAR).
+        if not _hbar_is_token0:
+            positie_in_range_pct = 100.0 - positie_in_range_pct
         if _hbar_is_token0:
             prijs_onder, prijs_boven = _prijs_onder_canoniek, _prijs_boven_canoniek
         else:
@@ -186,6 +211,9 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
             "width_pct": breedte_pct, "in_range_pct": positie_in_range_pct,
             "range_status": range_status,
             "fee_hbar": fee_hbar, "fee_sauce": fee_sauce, "fee_value_usd": fee_waarde_usd,
+            "opened_at": positie_open_ts,
+            "days_open": ((time.time() - positie_open_ts) / 86400) if positie_open_ts else None,
+            "realized_fees_apr": gerealiseerde_fees_apr,
         }
 
     # (7 sep 2026) Echte SAUCE (LARI-rewards) apart lezen en meetellen --
@@ -371,3 +399,23 @@ def get_total_deposits_hbar(account_evm_address: str) -> float:
         pagina_teller += 1
 
     return totaal_tinybar / (10 ** 8)
+
+
+_nft_created_cache: dict = {}
+
+
+def _position_nft_created_ts(token_id: int) -> Optional[float]:
+    """Aanmaaktijd (unix) van de positie-NFT via de mirrornode. NFT-token-id
+    via .env (POSITION_NFT_TOKEN_ID); op mainnet standaard 0.0.4054027."""
+    import requests
+    if token_id in _nft_created_cache:
+        return _nft_created_cache[token_id]
+    nft_token = os.environ.get("POSITION_NFT_TOKEN_ID") or ("0.0.4054027" if HEDERA_NETWORK == "mainnet" else None)
+    if not nft_token:
+        return None
+    mirror = "https://mainnet.mirrornode.hedera.com" if HEDERA_NETWORK == "mainnet" else "https://testnet.mirrornode.hedera.com"
+    r = requests.get(f"{mirror}/api/v1/tokens/{nft_token}/nfts/{token_id}", timeout=15)
+    r.raise_for_status()
+    ts = float(r.json()["created_timestamp"])
+    _nft_created_cache[token_id] = ts
+    return ts
