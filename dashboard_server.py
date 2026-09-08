@@ -221,7 +221,8 @@ async def _build_dashboard_context() -> dict:
             ) if data["position"] else "",
             "hbar_price_eur": data["hbar_price_usd"] * USD_NAAR_EUR,
             "quote_symbol": "USDC" if HEDERA_NETWORK == "mainnet" else "SAUCE",
-            "macro": _macro_for_dashboard(data.get("macro_regime")),
+            "macro": _macro_for_dashboard(_bot_state().get("macro_regime")),
+            "bot_state": _bot_state(),
             "pool_apr_pct": pool_apr * 100,
             "pool_apr_breed_pct": pool_apr_breed * 100,
             "fees_apr_now_pct": pm["fees_apr_now"] * 100 if pm and pm.get("fees_apr_now") is not None else None,
@@ -457,3 +458,15 @@ async def api_scenarios():
     out["inputs"]["fees_apr_pct"] = fees_apr
     out["inputs"]["lari_apr_pct"] = lari_apr
     return JSONResponse(out)
+
+
+def _bot_state() -> dict:
+    """Statusbestand dat de bot elke cyclus schrijft (zie _write_bot_state)."""
+    try:
+        import json
+        with open(os.environ.get("BOT_STATE_FILE", "/app/logs/bot_state.json")) as f:
+            d = json.load(f)
+        d["age_seconds"] = time.time() - d.get("updated_at", 0)
+        return d
+    except Exception:
+        return {}
