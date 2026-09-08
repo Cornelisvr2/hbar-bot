@@ -328,6 +328,7 @@ _pool_metrics_cache: dict = {}
 def compute_pool_metrics(w3, factory_address: str, whbar_address: str, quote_address: str,
                          fee_tier: int, tick_spacing: int, quote_decimals: int,
                          hbar_price_usd: float, quote_price_usd: float, volume_24h_usd: float,
+                         volume_1h_usd: float = 0.0, volume_7d_avg_usd: float = 0.0,
                          our_liquidity: int = 0, our_tick_lower: Optional[int] = None,
                          our_tick_upper: Optional[int] = None, position_value_usd: float = 0.0,
                          sauce_price_usd: Optional[float] = None) -> dict:
@@ -366,6 +367,9 @@ def compute_pool_metrics(w3, factory_address: str, whbar_address: str, quote_add
         rng = compute_balanced_range_tvl(w3, pool_address, fee_tier, tick_spacing, t0_dec, t1_dec, p0, p1)
         _pool_metrics_cache[cache_key] = (time.time(), (pool_address, rng))
     fees_apr = compute_fees_apr_balanced(volume_24h_usd, fee_tier, rng.tvl_in_range_usd)
+    # (8 sep 2026, op verzoek) drie volume-vensters naast elkaar, zelfde noemer
+    fees_apr_now = compute_fees_apr_balanced(volume_1h_usd * 24, fee_tier, rng.tvl_in_range_usd) if volume_1h_usd else None
+    fees_apr_7d = compute_fees_apr_balanced(volume_7d_avg_usd, fee_tier, rng.tvl_in_range_usd) if volume_7d_avg_usd else None
 
     lari = None
     if sauce_price_usd is None:
@@ -382,6 +386,11 @@ def compute_pool_metrics(w3, factory_address: str, whbar_address: str, quote_add
     return {
         "pool_address": pool_address,
         "fees_apr_balanced": fees_apr,
+        "fees_apr_now": fees_apr_now,
+        "fees_apr_7d": fees_apr_7d,
+        "volume_1h_usd": volume_1h_usd,
+        "volume_24h_usd": volume_24h_usd,
+        "volume_7d_avg_usd": volume_7d_avg_usd,
         "tvl_in_range_usd": rng.tvl_in_range_usd,
         "tick_current": rng.tick_current,
         "range_ticks": (rng.tick_lower, rng.tick_upper),
