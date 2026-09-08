@@ -71,7 +71,22 @@ async def check_for_commands(state: BotCommandState, regime_orchestrator) -> Non
                                      "geen nieuwe regime-overgangen totdat je /resume stuurt.")
         elif text == "/resume":
             state.paused = False
-            _reply(token, chat_id, "Bot hervat. Normale werking weer actief.")
+            # (8 sep 2026) Ook de USDC-depeg-noodstop opheffen: terug naar
+            # LP_MODE; het vangnet opent dan vanzelf weer een positie.
+            if getattr(regime_orchestrator, "current_regime", None) is not None \
+                    and regime_orchestrator.current_regime.value == "depeg_halt":
+                from regime_orchestrator import Regime
+                regime_orchestrator.current_regime = Regime.LP_MODE
+                regime_orchestrator._last_transition_at = 0.0
+                try:
+                    await regime_orchestrator.db.save_regime_state(
+                        "lp_mode", None, regime_orchestrator._active_reflex_episode_id,
+                        regime_orchestrator._flash_defense_until)
+                except Exception:
+                    pass
+                _reply(token, chat_id, "DEPEG_HALT opgeheven: bot terug in LP_MODE, vangnet opent een nieuwe positie.")
+            else:
+                _reply(token, chat_id, "Bot hervat. Normale werking weer actief.")
         elif text == "/status":
             _reply(token, chat_id, _format_status(state, regime_orchestrator))
         elif text == "/balance":
