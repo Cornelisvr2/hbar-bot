@@ -35,10 +35,10 @@ class PoolSnapshot:
     price_usd: float
     volume_24h_usd: float
     liquidity_usd: float
-    volume_1h_usd: float = 0.0  # (8 sep 2026) voor de "nu"-variant van de Fees-APR
     transactions_24h: int
     buys_24h: int
     sells_24h: int
+    volume_1h_usd: float = 0.0  # (8 sep 2026) voor de "nu"-variant van de Fees-APR
 
 
 @dataclass
