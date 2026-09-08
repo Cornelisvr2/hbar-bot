@@ -375,7 +375,7 @@
       </div>
     </div>
     <div class="projection-note">
-      Uitgaande van de huidige pool-APR ({{ "%.1f"|format(d.pool_apr_pct) }}%), dagelijks samengesteld,
+      Uitgaande van de 7-daags gemiddelde Fees-APR plus LARI-schatting ({{ "%.1f"|format(d.projection_apr_pct) }}%), dagelijks samengesteld,
       zonder verdere stortingen. Geen garantie — de APR schommelt in de
       praktijk met het handelsvolume, en zegt niets over koersrisico
       (impermanent loss) op de onderliggende HBAR/{{ d.quote_symbol }}-posities.
@@ -394,7 +394,10 @@
         <span>{{ "%.4f"|format(d.position.price_upper) if d.position else "—" }}</span>
       </div>
       <div class="stat-line"><span class="label">Breedte</span><span class="val">{{ "%.1f"|format(d.position.width_pct) if d.position else "—" }}%</span></div>
-      <div class="stat-line"><span class="label">Prijs in range</span><span class="val">{{ "%.1f"|format(d.position.in_range_pct) if d.position else "—" }}%</span></div>
+      <div class="stat-line"><span class="label">Afstand tot onderrand</span><span class="val">{{ "%.1f"|format(d.position.in_range_pct) if d.position else "—" }}% <span style="color: var(--text-muted);">van de range-breedte</span></span></div>
+      {% if d.realized_fees_apr_pct is not none %}
+      <div class="stat-line"><span class="label">Gerealiseerde Fees-APR</span><span class="val status-ok">{{ "%.1f"|format(d.realized_fees_apr_pct) }}% <span style="color: var(--text-muted);">(opgebouwde fees over {{ "%.1f"|format(d.position_days_open) }} dagen — de echte maatstaf)</span></span></div>
+      {% endif %}
       <div class="stat-line"><span class="label">Status</span><span class="val {{ 'status-ok' if d.position and d.position.range_status == 'gezond' else '' }}">{{ d.range_status_label }}</span></div>
       {% if d.fees_apr_now_pct is not none %}
       <div class="stat-line"><span class="label">Fees-APR nu (laatste uur ×24)</span><span class="val">{{ "%.1f"|format(d.fees_apr_now_pct) }}% <span style="color: var(--text-muted);">(vol ${{ "{:,.0f}".format(d.volume_1h_usd) }}/u)</span></span></div>
