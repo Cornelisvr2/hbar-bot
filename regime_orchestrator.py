@@ -201,7 +201,7 @@ class RegimeOrchestrator:
         self.trailing_tracker: Optional[TrailingStopTracker] = None
         self.bearish_tracker: Optional[BearishTrailingStopTracker] = None  # (8 sep 2026)
         from depeg_guard import DepegGuard
-        self.depeg_guard = DepegGuard()  # (8 sep 2026)
+        self.depeg_guard = DepegGuard(self.binance_klines)  # (8 sep 2026)
 
         # NIEUW (3 sep 2026, op verzoek): markt-bevestigde terugkeer naar
         # LP_MODE tijdens een reflex-uitstap -- ANDERS dan de bestaande
@@ -1473,14 +1473,14 @@ class RegimeOrchestrator:
         if self.depeg_guard.should_warn(reading):
             telegram_notify.send_telegram_message(f"⚠️ USDC-waarschuwing: {reading.summary()}")
             decision_log.log("depeg_warning", **{k: getattr(reading, k) for k in
-                             ("saucerswap_usdc_usd", "coingecko_usdc_usd", "pool_hbar_usdc", "binance_hbar_usdt", "signals")})
+                             ("binance_usdc_usdt", "coingecko_usdc_usd", "pool_hbar_usdc", "binance_hbar_usdt", "signals")})
         if not halt:
             return
         telegram_notify.send_telegram_message(
             f"🚨 USDC-DEPEG-NOODSTOP: {reading.summary()} -- positie sluiten, alles naar HBAR, bot stopt (DEPEG_HALT). "
             f"Hervatten met /resume zodra je USDC weer vertrouwt.")
         decision_log.log("depeg_halt", price=current_price, **{k: getattr(reading, k) for k in
-                         ("saucerswap_usdc_usd", "coingecko_usdc_usd", "pool_hbar_usdc", "binance_hbar_usdt", "signals")})
+                         ("binance_usdc_usdt", "coingecko_usdc_usd", "pool_hbar_usdc", "binance_hbar_usdt", "signals")})
         await self._execute_depeg_halt(current_price)
 
     async def _execute_depeg_halt(self, current_price: float):
