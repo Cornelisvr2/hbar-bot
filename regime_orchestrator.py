@@ -161,6 +161,30 @@ class Regime(Enum):
     LP_MODE = "lp_mode"
     BULLISH_REFLEX = "bullish_reflex"
     BEARISH_REFLEX = "bearish_reflex"
+    DEPEG_HALT = "depeg_halt"  # (8 sep 2026) USDC-depeg-noodstop: 100% HBAR, wacht op /resume
+
+
+# (8 sep 2026) Trailing-stop-parameters, instelbaar. Bullish: 5% onder de
+# hoogste prijs sinds instap, harde stop op instap -5%. Bearish (spiegel):
+# 5% boven de laagste prijs, harde stop op instap +5%.
+TRAILING_STOP_PCT = float(os.environ.get("TRAILING_STOP_PCT", "0.05"))
+
+
+class BearishTrailingStopTracker:
+    """Spiegel van TrailingStopTracker: volgt de LAAGSTE prijs sinds instap in
+    BEARISH_REFLEX (100% USDC); stop = laagste * (1 + pct), nooit boven de
+    harde stop op instapprijs * (1 + pct)."""
+
+    def __init__(self, entry_price: float, trailing_distance_pct: float):
+        self.entry_price = entry_price
+        self.trailing_distance_pct = trailing_distance_pct
+        self.lowest_price = entry_price
+        self.hard_stop = entry_price * (1 + trailing_distance_pct)
+
+    def update(self, current_price: float) -> float:
+        if current_price < self.lowest_price:
+            self.lowest_price = current_price
+        return min(self.lowest_price * (1 + self.trailing_distance_pct), self.hard_stop)
 
 
 class RegimeOrchestrator:
@@ -175,6 +199,9 @@ class RegimeOrchestrator:
         self.total_capital_usdc = float(os.environ.get("REGIME_TOTAL_CAPITAL_USDC", "2000"))
         self.current_regime = Regime.LP_MODE
         self.trailing_tracker: Optional[TrailingStopTracker] = None
+        self.bearish_tracker: Optional[BearishTrailingStopTracker] = None  # (8 sep 2026)
+        from depeg_guard import DepegGuard
+        self.depeg_guard = DepegGuard()  # (8 sep 2026)
 
         # NIEUW (3 sep 2026, op verzoek): markt-bevestigde terugkeer naar
         # LP_MODE tijdens een reflex-uitstap -- ANDERS dan de bestaande
@@ -1425,6 +1452,67 @@ class RegimeOrchestrator:
             print(f"[regime] Opgeslagen positie {saved['token_id']} bleek al gesloten, "
                   f"database-vermelding opgeruimd.")
 
+    async def _check_depeg(self, current_price: float):
+        """(8 sep 2026) Zie depeg_guard.py. current_price = HBAR in USDC (pool)."""
+        import decision_log
+        try:
+            binance = None
+            try:
+                kl = self.binance_klines.get_klines("HBAR", interval="1m", limit=1)
+                binance = kl[-1].close if kl else None
+            except Exception:
+                pass
+            halt, reading = self.depeg_guard.check(current_price, binance)
+        except Exception as e:
+            print(f"[depeg] check mislukt: {str(e)[:100]}")
+            return
+        if reading is None:
+            return
+        if reading.signals:
+            print(f"[depeg] signalen {reading.signals}: {reading.summary()}")
+        if self.depeg_guard.should_warn(reading):
+            telegram_notify.send_telegram_message(f"⚠️ USDC-waarschuwing: {reading.summary()}")
+            decision_log.log("depeg_warning", **{k: getattr(reading, k) for k in
+                             ("saucerswap_usdc_usd", "coingecko_usdc_usd", "pool_hbar_usdc", "binance_hbar_usdt", "signals")})
+        if not halt:
+            return
+        telegram_notify.send_telegram_message(
+            f"🚨 USDC-DEPEG-NOODSTOP: {reading.summary()} -- positie sluiten, alles naar HBAR, bot stopt (DEPEG_HALT). "
+            f"Hervatten met /resume zodra je USDC weer vertrouwt.")
+        decision_log.log("depeg_halt", price=current_price, **{k: getattr(reading, k) for k in
+                         ("saucerswap_usdc_usd", "coingecko_usdc_usd", "pool_hbar_usdc", "binance_hbar_usdt", "signals")})
+        await self._execute_depeg_halt(current_price)
+
+    async def _execute_depeg_halt(self, current_price: float):
+        from depeg_guard import DEPEG_SWAP_SLIPPAGE
+        errors = []
+        try:
+            if self.lp_manager and self.lp_manager.state.is_open:
+                self.lp_manager.close_position(self.lp_manager.state.token_id)
+                await self.db.clear_active_lp_position()
+        except Exception as e:
+            errors.append(f"sluiten: {e}")
+        try:
+            usdc = self._get_swappable_usdc_balance()
+            if usdc > 1.0:
+                ok = await self._run_swap_and_log("USDC_TO_HBAR", usdc, None, slippage=DEPEG_SWAP_SLIPPAGE)
+                if not ok:
+                    errors.append("USDC->HBAR swap mislukt")
+        except Exception as e:
+            errors.append(f"swap: {e}")
+        self.trailing_tracker = None
+        self.bearish_tracker = None
+        self.current_regime = Regime.DEPEG_HALT
+        self._last_transition_at = time.time()
+        try:
+            await self.db.save_regime_state(Regime.DEPEG_HALT.value, None, self._active_reflex_episode_id,
+                                            self._flash_defense_until)
+        except Exception as e:
+            errors.append(f"state opslaan: {e}")
+        if errors:
+            telegram_notify.report_error("depeg_halt", "; ".join(errors)[:400] +
+                                         " -- CONTROLEER DE WALLET HANDMATIG.")
+
     def _write_bot_state(self, paused: bool = False):
         """(8 sep 2026) Klein statusbestand op de gedeelde logs-map: het
         dashboard toont hiermee het bot-regime naast de macro-analyse, en
@@ -1495,10 +1583,12 @@ class RegimeOrchestrator:
                 f"gedetecteerd -- hersteld, nog {resterend_min:.1f} minuten te gaan."
             )
 
+        if self.current_regime == Regime.BEARISH_REFLEX and saved["trailing_entry_price"]:
+            self.bearish_tracker = BearishTrailingStopTracker(saved["trailing_entry_price"], TRAILING_STOP_PCT)
         if self.current_regime == Regime.BULLISH_REFLEX and saved["trailing_entry_price"]:
             self.trailing_tracker = TrailingStopTracker(
-                entry_price=saved["trailing_entry_price"], trailing_distance_pct=0.05,
-                initial_stop_loss=saved["trailing_entry_price"] * 0.95,
+                entry_price=saved["trailing_entry_price"], trailing_distance_pct=TRAILING_STOP_PCT,
+                initial_stop_loss=saved["trailing_entry_price"] * (1 - TRAILING_STOP_PCT),
             )
 
         print(f"[regime] Regimestatus hersteld na herstart: {self.current_regime.value} "
@@ -1636,7 +1726,7 @@ class RegimeOrchestrator:
         # zou een herstart TIJDENS een actieve verdedigingsperiode dit
         # vergeten en het vangnet meteen weer (te vroeg) kunnen laten
         # heropenen.
-        trailing_entry_price = self.trailing_tracker.entry_price if self.trailing_tracker else None
+        trailing_entry_price = (self.trailing_tracker.entry_price if self.trailing_tracker else (self.bearish_tracker.entry_price if self.bearish_tracker else None))
         await self.db.save_regime_state(
             self.current_regime.value, trailing_entry_price, self._active_reflex_episode_id,
             self._flash_defense_until,
@@ -1772,7 +1862,7 @@ class RegimeOrchestrator:
                 if reversion_result.is_mean_reversion:
                     resterend_min = (self._flash_defense_until - time.time()) / 60
                     self._flash_defense_until = time.time()  # verdediging direct beeindigen
-                    trailing_entry_price = self.trailing_tracker.entry_price if self.trailing_tracker else None
+                    trailing_entry_price = (self.trailing_tracker.entry_price if self.trailing_tracker else (self.bearish_tracker.entry_price if self.bearish_tracker else None))
                     await self.db.save_regime_state(
                         self.current_regime.value, trailing_entry_price,
                         self._active_reflex_episode_id, self._flash_defense_until,
@@ -1973,6 +2063,14 @@ class RegimeOrchestrator:
             current_price = pool_snapshot.price_usd
         except Exception as e:
             telegram_notify.report_error("regime_loop: prijs ophalen", str(e))
+            return
+
+        # (8 sep 2026) USDC-depeg-noodstop: overrulet alle regimes.
+        if self.current_regime == Regime.DEPEG_HALT:
+            print("[depeg] DEPEG_HALT actief -- 100% HBAR, wacht op /resume.")
+            return
+        await self._check_depeg(current_price)
+        if self.current_regime == Regime.DEPEG_HALT:
             return
 
         # Live Fees-APR berekenen (30 aug 2026, op verzoek) -- puur
@@ -2362,6 +2460,7 @@ class RegimeOrchestrator:
         else:
             fresh_reflex_price = current_price
 
+        import decision_log
         if self.current_regime == Regime.BULLISH_REFLEX and self.trailing_tracker:
             stop_price = self.trailing_tracker.update(fresh_reflex_price)
             if fresh_reflex_price <= stop_price:
@@ -2369,6 +2468,34 @@ class RegimeOrchestrator:
                       f"(prijs={fresh_reflex_price:.5f} <= stop={stop_price:.5f}) -- winst nemen.")
                 target_regime = Regime.LP_MODE
                 is_profit_take = True
+                decision_log.log("trailing_stop", side="bullish", price=fresh_reflex_price, stop=stop_price,
+                                 highest=self.trailing_tracker.highest_price, entry=self.trailing_tracker.entry_price,
+                                 pct=TRAILING_STOP_PCT, combined_score=combined_score)
+            elif fresh_reflex_price <= stop_price * 1.015:
+                decision_log.near_miss("trailing_stop_bullish", price=fresh_reflex_price, stop=stop_price,
+                                       highest=self.trailing_tracker.highest_price, combined_score=combined_score)
+
+        # (8 sep 2026) Spiegel: bearish trailing-stop. 100% USDC; stijgt de
+        # prijs 5% vanaf het dal (of 5% boven instap), dan is de daling
+        # voorbij -> direct terug naar LP. Zelfde cooldown-uitzondering.
+        if self.current_regime == Regime.BEARISH_REFLEX and self.bearish_tracker:
+            stop_price = self.bearish_tracker.update(fresh_reflex_price)
+            if fresh_reflex_price >= stop_price:
+                print(f"[regime] Bearish trailing-stop getriggerd tijdens BEARISH_REFLEX "
+                      f"(prijs={fresh_reflex_price:.5f} >= stop={stop_price:.5f}) -- daling voorbij, terug naar LP.")
+                target_regime = Regime.LP_MODE
+                is_profit_take = True
+                decision_log.log("trailing_stop", side="bearish", price=fresh_reflex_price, stop=stop_price,
+                                 lowest=self.bearish_tracker.lowest_price, entry=self.bearish_tracker.entry_price,
+                                 pct=TRAILING_STOP_PCT, combined_score=combined_score)
+            elif fresh_reflex_price >= stop_price * 0.985:
+                decision_log.near_miss("trailing_stop_bearish", price=fresh_reflex_price, stop=stop_price,
+                                       lowest=self.bearish_tracker.lowest_price, combined_score=combined_score)
+
+        # Near-miss op de reflex-drempels: score binnen 0,10 van +-0,55
+        if self.current_regime == Regime.LP_MODE and REGIME_THRESHOLD - 0.10 <= abs(combined_score) < REGIME_THRESHOLD:
+            decision_log.near_miss("reflex_threshold", combined_score=combined_score, threshold=REGIME_THRESHOLD,
+                                   price=current_price, side="bullish" if combined_score > 0 else "bearish")
 
         # NIEUW (3 sep 2026, op verzoek): markt-bevestigde terugkeer naar
         # LP_MODE -- ANDERS dan de trailing-stop hierboven (specifiek
@@ -2391,6 +2518,8 @@ class RegimeOrchestrator:
                 )
                 target_regime = Regime.LP_MODE
                 is_market_confirmed_reentry = True
+                decision_log.log("market_confirmed_exit", regime=self.current_regime.value,
+                                 price=fresh_reflex_price, reason=market_confirmed_reason, combined_score=combined_score)
                 market_confirmed_reason = reden
 
         if target_regime == self.current_regime:
@@ -2419,6 +2548,9 @@ class RegimeOrchestrator:
             remaining_min = (self.regime_cooldown_seconds - seconds_since_last) / 60
             print(f"[regime] Overgang naar {target_regime.value} uitgesteld -- "
                   f"cooldown actief, nog {remaining_min:.1f} min.")
+            decision_log.near_miss("regime_deferred_cooldown", from_regime=self.current_regime.value,
+                                   to_regime=target_regime.value, combined_score=combined_score,
+                                   price=current_price, remaining_min=round(remaining_min, 1))
             return
 
         print(f"[regime] OVERGANG: {self.current_regime.value} -> {target_regime.value} "
@@ -2438,8 +2570,8 @@ class RegimeOrchestrator:
             print(f"[DRY RUN] Zou overgaan van {self.current_regime.value} naar {target_regime.value}")
             if target_regime == Regime.BULLISH_REFLEX:
                 self.trailing_tracker = TrailingStopTracker(
-                    entry_price=current_price, trailing_distance_pct=0.05,
-                    initial_stop_loss=current_price * 0.95,
+                    entry_price=current_price, trailing_distance_pct=TRAILING_STOP_PCT,
+                    initial_stop_loss=current_price * (1 - TRAILING_STOP_PCT),
                 )
             self.current_regime = target_regime
             self._last_transition_at = time.time()
@@ -2448,6 +2580,12 @@ class RegimeOrchestrator:
         previous_regime = self.current_regime  # nodig om exit correct te loggen, voor overschrijven
         transition_succeeded = await self._execute_transition(target_regime, current_price, signal_id)
         self._last_transition_at = time.time()
+        decision_log.log("regime_change", from_regime=previous_regime.value, to_regime=target_regime.value,
+                         succeeded=transition_succeeded, price=current_price, combined_score=combined_score,
+                         threshold=REGIME_THRESHOLD, exit_threshold=REGIME_THRESHOLD_EXIT,
+                         trigger=("trailing_stop" if is_profit_take else
+                                  "market_confirmed" if is_market_confirmed_reentry else "score"),
+                         macro_regime=self._cached_macro_regime, hourly_vol=self._cached_hourly_volatility)
 
         # BUGFIX (4 sep 2026, KRITIEK, gevonden na een spam-lus van
         # identieke Telegram-berichten, elke cyclus): als een markt-
@@ -2502,7 +2640,7 @@ class RegimeOrchestrator:
 
             # Regimestatus persisteren (27 aug 2026) -- zodat een herstart
             # niet langer altijd terugvalt op de default LP_MODE.
-            trailing_entry_price = self.trailing_tracker.entry_price if self.trailing_tracker else None
+            trailing_entry_price = (self.trailing_tracker.entry_price if self.trailing_tracker else (self.bearish_tracker.entry_price if self.bearish_tracker else None))
             await self.db.save_regime_state(
                 self.current_regime.value, trailing_entry_price, self._active_reflex_episode_id,
                 self._flash_defense_until,
@@ -2617,7 +2755,8 @@ class RegimeOrchestrator:
             return 0.0
 
     async def _run_swap_and_log(self, direction: str, amount: float,
-                                  signal_id: Optional[int] = None) -> bool:
+                                  signal_id: Optional[int] = None,
+                                  slippage: Optional[float] = None) -> bool:
         """Voert een swap uit en logt het resultaat naar Postgres. Geeft True terug bij succes."""
         # BUGFIX (7 sep 2026): fee-tier EXPLICIET meegeven. Zonder dit
         # viel het subprocess terug op zijn eigen default (3000), terwijl
@@ -2629,7 +2768,8 @@ class RegimeOrchestrator:
             ["python3", "execute_hbar_swap_standalone.py",
              "--direction", direction, "--amount", str(amount),
              "--network", HEDERA_NETWORK, "--engine", "v2",
-             "--fee-tier", str(fee_tier)],
+             "--fee-tier", str(fee_tier)]
+            + (["--slippage", str(slippage)] if slippage else []),
             capture_output=True, text=True,
         )
         status = "success" if result.returncode == 0 else "failed"
@@ -2784,9 +2924,10 @@ class RegimeOrchestrator:
                 success = await self._run_swap_and_log("USDC_TO_HBAR", usdc_to_swap, signal_id)
             all_succeeded = all_succeeded and success
             if success:
+                self.bearish_tracker = None
                 self.trailing_tracker = TrailingStopTracker(
-                    entry_price=current_price, trailing_distance_pct=0.05,
-                    initial_stop_loss=current_price * 0.95,
+                    entry_price=current_price, trailing_distance_pct=TRAILING_STOP_PCT,
+                    initial_stop_loss=current_price * (1 - TRAILING_STOP_PCT),
                 )
                 telegram_notify.send_telegram_message(
                     f"Regime-schakelaar: BULLISH_REFLEX -- {usdc_to_swap:.2f} USDC naar HBAR "
@@ -2801,6 +2942,7 @@ class RegimeOrchestrator:
             all_succeeded = all_succeeded and success
             if success:
                 self.trailing_tracker = None
+                self.bearish_tracker = BearishTrailingStopTracker(current_price, TRAILING_STOP_PCT)
                 telegram_notify.send_telegram_message(
                     f"Regime-schakelaar: BEARISH_REFLEX -- {hbar_to_swap:.4f} HBAR naar USDC "
                     f"bij {current_price:.5f}."
@@ -2979,6 +3121,7 @@ class RegimeOrchestrator:
                         self.lp_manager.state.tick_upper,
                     )
                     self.trailing_tracker = None
+                    self.bearish_tracker = None
                     telegram_notify.send_telegram_message(
                         f"Regime-schakelaar: terug naar LP_MODE -- {hbar_raw/(10**self._hbar_decimals):.4f} HBAR "
                         f"+ {usdc_raw/(10**self._usdc_decimals):.2f} USDC in de pool."
