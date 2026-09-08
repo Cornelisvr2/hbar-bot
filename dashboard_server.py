@@ -425,3 +425,25 @@ def _macro_for_dashboard(current_bot_regime):
     except Exception as e:
         print(f"[waarschuwing] macro-analyse niet beschikbaar: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Scenario-model tot ~2030 (8 sep 2026): HODL vs bot per prijspad
+# ---------------------------------------------------------------------------
+@app.get("/api/scenarios")
+async def api_scenarios():
+    from scenario_model import run_all
+    ctx = await _build_dashboard_context()
+    p0 = ctx.get("hbar_price_usd") or 0.0
+    start_value = ctx.get("total_value_usd") or 0.0
+    fees_apr = ctx.get("fees_apr_7d_pct")
+    if fees_apr is None:
+        fees_apr = ctx.get("pool_apr_pct") or 0.0
+    lari_apr = ctx.get("lari_our_apr_pct") or 0.0
+    total_apr = (fees_apr + lari_apr) / 100.0
+    if p0 <= 0 or start_value <= 0:
+        return JSONResponse({"error": "geen prijs/waarde beschikbaar"}, status_code=503)
+    out = run_all(p0, start_value, total_apr)
+    out["inputs"]["fees_apr_pct"] = fees_apr
+    out["inputs"]["lari_apr_pct"] = lari_apr
+    return JSONResponse(out)
