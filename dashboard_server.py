@@ -68,9 +68,16 @@ async def _build_dashboard_context() -> dict:
         # een enkele, volatiele dag extrapoleren (zou een onrealistisch
         # getal geven), maar de stabielere, jaarlijkse APR-maatstaf.
         totaal = data["total_value_usd"]
-        projectie_30d = totaal * (1 + pool_apr / 365) ** 30
-        projectie_90d = totaal * (1 + pool_apr / 365) ** 90
-        projectie_180d = totaal * (1 + pool_apr / 365) ** 180
+        # (8 sep 2026) Projectie op de STABIELSTE maatstaf: 7-daags
+        # gemiddelde Fees-APR + LARI-schatting voor onze positie; niet op
+        # het 24u-getal (te volatiel) en niet op de hele-pool-APR (die
+        # onderschat structureel t.o.v. de gerealiseerde fees).
+        fees_apr_7d = pm["fees_apr_7d"] if pm and pm.get("fees_apr_7d") is not None else pool_apr_breed
+        projectie_apr = fees_apr_7d + (lari.our_reward_apr if lari else 0.0)
+        projectie_30d = totaal * (1 + projectie_apr / 365) ** 30
+        projectie_90d = totaal * (1 + projectie_apr / 365) ** 90
+        projectie_180d = totaal * (1 + projectie_apr / 365) ** 180
+        _pos = data.get("position") or {}
 
         # Waardeverandering 24u (hergebruikt dezelfde aanpak als het
         # Telegram-rapport).
@@ -231,6 +238,9 @@ async def _build_dashboard_context() -> dict:
             "lari_realized_hbar": lari_realized.hbar_received if lari_realized else None,
             "lari_realized_count": lari_realized.airdrop_count if lari_realized else None,
             "total_apr_pct": (pool_apr + (lari.our_reward_apr if lari else 0.0)) * 100,
+            "projection_apr_pct": projectie_apr * 100,
+            "realized_fees_apr_pct": (_pos["realized_fees_apr"] * 100) if _pos.get("realized_fees_apr") is not None else None,
+            "position_days_open": _pos.get("days_open"),
             "projection_30d": projectie_30d,
             "projection_90d": projectie_90d,
             "projection_180d": projectie_180d,
