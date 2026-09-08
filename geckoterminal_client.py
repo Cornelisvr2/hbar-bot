@@ -35,6 +35,7 @@ class PoolSnapshot:
     price_usd: float
     volume_24h_usd: float
     liquidity_usd: float
+    volume_1h_usd: float = 0.0  # (8 sep 2026) voor de "nu"-variant van de Fees-APR
     transactions_24h: int
     buys_24h: int
     sells_24h: int
@@ -87,6 +88,7 @@ class GeckoTerminalClient:
             price_usd=float(data.get("base_token_price_usd", 0)),
             volume_24h_usd=float(data.get("volume_usd", {}).get("h24", 0)),
             liquidity_usd=float(data.get("reserve_in_usd", 0)),
+            volume_1h_usd=float(data.get("volume_usd", {}).get("h1", 0)),
             transactions_24h=int(data.get("transactions", {}).get("h24", {}).get("buys", 0))
             + int(data.get("transactions", {}).get("h24", {}).get("sells", 0)),
             buys_24h=int(data.get("transactions", {}).get("h24", {}).get("buys", 0)),
@@ -94,6 +96,20 @@ class GeckoTerminalClient:
         )
         GeckoTerminalClient._snapshot_cache[pool_address] = (nu, snapshot)
         return snapshot
+
+    _volume_7d_cache: dict = {}
+
+    def get_avg_daily_volume_7d(self, pool_address: str = DEFAULT_WHBAR_USDC_POOL_ADDRESS) -> float:
+        """(8 sep 2026) Gemiddeld dagvolume over de laatste 7 afgesloten dag-candles (1u cache)."""
+        hit = self._volume_7d_cache.get(pool_address)
+        if hit and time.time() - hit[0] < 3600:
+            return hit[1]
+        candles = self.get_historical_ohlcv(pool_address=pool_address, timeframe="day", limit=8)
+        # GeckoTerminal geeft nieuwste eerst; de eerste is de lopende (onvolledige) dag
+        closed = candles[1:8] if len(candles) > 1 else candles
+        avg = sum(c.volume for c in closed) / len(closed) if closed else 0.0
+        self._volume_7d_cache[pool_address] = (time.time(), avg)
+        return avg
 
     def get_historical_ohlcv(
         self,
