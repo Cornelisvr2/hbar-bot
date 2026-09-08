@@ -488,6 +488,19 @@
   {% endif %}
 
   <div class="panel">
+    <div class="panel-title">Scenario's tot 2030 <span style="color: var(--text-muted); font-weight: normal;">(geen voorspelling — expliciete aannames, HODL vs bot-strategie)</span></div>
+    <div class="log-toolbar">
+      <button data-scen="bear">bear</button>
+      <button class="active" data-scen="basis">basis</button>
+      <button data-scen="bull">bull</button>
+      <span class="log-status" id="scenStatus">berekenen…</span>
+    </div>
+    <div class="chart-wrap"><canvas id="scenarioChart"></canvas></div>
+    <div id="scenTable"></div>
+    <div id="scenInputs" style="color: var(--text-muted); font-family: var(--mono); font-size: 12px; margin-top: 10px;"></div>
+  </div>
+
+  <div class="panel">
     <div class="panel-title">Live-log</div>
     <div class="log-toolbar">
       <button class="active" data-filter="">alles</button>
@@ -607,6 +620,66 @@
     details.style.display = zichtbaar ? 'none' : 'block';
     knop.textContent = zichtbaar ? 'Toon details' : 'Verberg details';
   }
+
+  // --- Scenario's (8 sep 2026) ---
+  (function () {
+    const status = document.getElementById('scenStatus');
+    const tableEl = document.getElementById('scenTable');
+    const inputsEl = document.getElementById('scenInputs');
+    let data = null, chart = null, current = 'basis';
+    const fmt = v => '$' + Number(v).toFixed(0);
+    const pct = v => (v >= 0 ? '+' : '') + Number(v).toFixed(0) + '%';
+
+    function renderTable() {
+      const rows = [];
+      const order = ['bear', 'basis', 'bull'];
+      rows.push('<table style="width:100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; margin-top: 10px;">');
+      rows.push('<tr style="color: var(--text-muted);"><td>scenario</td><td>APR</td><td>piek HBAR</td><td>12 mnd</td><td>24 mnd</td><td>op piek</td><td>48 mnd</td><td>bot wint</td><td>fees+LARI</td></tr>');
+      for (const k of order) {
+        const s = data.scenarios[k]; if (!s) continue;
+        const at = i => `${fmt(s.hodl[i])} → <b>${fmt(s.bot[i])}</b>`;
+        rows.push(`<tr style="border-top: 1px solid var(--border);"><td><b>${k}</b></td>` +
+          `<td>${data.inputs.effective_apr_pct[k].toFixed(0)}%</td>` +
+          `<td>$${s.peak_price.toFixed(3)} (${s.labels[s.peak_month]})</td>` +
+          `<td>${at(12)}</td><td>${at(24)}</td><td>${fmt(s.peak_hodl)} → <b>${fmt(s.peak_bot)}</b></td><td>${at(48)}</td>` +
+          `<td>${s.bot_wins_months}/${data.inputs.months} mnd</td><td>${fmt(s.fees_earned_usd)}</td></tr>`);
+      }
+      rows.push('</table>');
+      tableEl.innerHTML = rows.join('');
+      const i = data.inputs;
+      inputsEl.textContent = `Start: ${fmt(i.start_value_usd)} bij HBAR $${i.p0.toFixed(4)}. Gemeten APR: fees ${i.fees_apr_pct.toFixed(1)}% + LARI ${i.lari_apr_pct.toFixed(1)}% = ${i.total_apr_pct.toFixed(1)}%, per scenario geschaald (bear ×${i.apr_factor.bear}, basis ×${i.apr_factor.basis}, bull ×${i.apr_factor.bull}). ` +
+        `Bot-model: LP ≈ 50/50-blootstelling (√-regel) − IL×${i.il_factor} − ${i.rebalance_cost_pct.toFixed(1)}%/mnd herbalanceren; reflex bij ±${i.reflex_up_pct.toFixed(0)}/${i.reflex_down_pct.toFixed(0)}% over 3 mnd met trefkans ${i.reflex_hit_rate}. Ankerpunten aanpasbaar via SCENARIO_ANCHORS_JSON in .env.`;
+    }
+    function renderChart() {
+      const s = data.scenarios[current]; if (!s) return;
+      const ctx = document.getElementById('scenarioChart').getContext('2d');
+      const cfg = {
+        type: 'line',
+        data: { labels: s.labels, datasets: [
+          { label: 'HODL', data: s.hodl, borderColor: '#8a8f98', borderWidth: 1.5, pointRadius: 0, tension: 0.2, yAxisID: 'y' },
+          { label: 'Bot-strategie', data: s.bot, borderColor: '#4ade80', borderWidth: 2, pointRadius: 0, tension: 0.2, yAxisID: 'y' },
+          { label: 'HBAR-prijs', data: s.price, borderColor: '#60a5fa', borderWidth: 1, borderDash: [4, 3], pointRadius: 0, tension: 0.2, yAxisID: 'y2' },
+        ]},
+        options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+          plugins: { legend: { labels: { color: '#8a8f98', font: { family: 'monospace', size: 11 } } } },
+          scales: {
+            x: { ticks: { color: '#8a8f98', maxTicksLimit: 12, font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+            y: { ticks: { color: '#8a8f98', callback: v => '$' + v }, grid: { color: 'rgba(255,255,255,0.05)' } },
+            y2: { position: 'right', ticks: { color: '#60a5fa', callback: v => '$' + Number(v).toFixed(2) }, grid: { drawOnChartArea: false } },
+          } }
+      };
+      if (chart) { chart.destroy(); }
+      chart = new Chart(ctx, cfg);
+    }
+    document.querySelectorAll('[data-scen]').forEach(b => b.addEventListener('click', () => {
+      document.querySelectorAll('[data-scen]').forEach(x => x.classList.remove('active'));
+      b.classList.add('active'); current = b.dataset.scen; renderChart();
+    }));
+    fetch('/api/scenarios').then(r => r.json()).then(d => {
+      if (d.error) { status.textContent = d.error; return; }
+      data = d; status.textContent = ''; renderTable(); renderChart();
+    }).catch(() => { status.textContent = 'scenario\'s niet beschikbaar'; });
+  })();
 
   // --- Live-log (7 sep 2026) ---
   (function () {
