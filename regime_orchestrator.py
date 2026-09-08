@@ -1546,6 +1546,14 @@ class RegimeOrchestrator:
             macro_result = detect_macro_regime(closes, lookback_days=30)
             oude_macro_regime = self._cached_macro_regime
             self._cached_macro_regime = macro_result.regime.value
+            # (8 sep 2026) Meerlaagse macro-analyse in SCHADUWMODUS: alleen
+            # loggen naast het oude 30d-momentum; beslist nog niets.
+            try:
+                from macro_analysis import compute_macro_analysis, format_log_line
+                _m = compute_macro_analysis(self.binance_klines, current_bot_regime=self._cached_macro_regime)
+                print(format_log_line(_m))
+            except Exception as e:
+                print(f"[macro] schaduw-analyse niet beschikbaar: {str(e)[:120]}")
 
             if oude_macro_regime is not None and self._cached_macro_regime != oude_macro_regime:
                 telegram_notify.send_telegram_message(
