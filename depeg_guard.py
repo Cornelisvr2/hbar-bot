@@ -3,7 +3,9 @@ depeg_guard.py -- (8 sep 2026, op verzoek) USDC-depeg-noodstop.
 
 Drie signalen; bij >= 2 gelijktijdig, twee metingen achter elkaar (>= 60 s
 uit elkaar), gaat de noodstop af:
-  1. SaucerSwap-API priceUsd van USDC (0.0.456858) < DEPEG_THRESHOLD (0,98)
+  1. Binance USDC/USDT (laatste 1m-candle) < DEPEG_THRESHOLD (0,98) --
+     een echte handelsmarkt; SaucerSwap's afgeleide priceUsd bleek
+     structureel ~0,994-0,996 te staan en gaf valse waarschuwingen
   2. Externe USDC/USD (CoinGecko) < DEPEG_THRESHOLD
   3. Pool-implied: HBAR-prijs in USDC (onze pool, on-chain) wijkt meer dan
      DEPEG_POOL_DIVERGENCE (2%) af van HBAR/USDT op Binance -- het signaal
@@ -33,7 +35,7 @@ USDC_TOKEN_ID = "0.0.456858"
 @dataclass
 class DepegReading:
     at: float
-    saucerswap_usdc_usd: Optional[float]
+    binance_usdc_usdt: Optional[float]
     coingecko_usdc_usd: Optional[float]
     pool_hbar_usdc: Optional[float]
     binance_hbar_usdt: Optional[float]
@@ -48,28 +50,29 @@ class DepegReading:
 
     def summary(self) -> str:
         div = self.divergence
-        return (f"SaucerSwap USDC={self.saucerswap_usdc_usd if self.saucerswap_usdc_usd is not None else 'n/b'} | "
+        return (f"Binance USDC/USDT={self.binance_usdc_usdt if self.binance_usdc_usdt is not None else 'n/b'} | "
                 f"CoinGecko USDC={self.coingecko_usdc_usd if self.coingecko_usdc_usd is not None else 'n/b'} | "
                 f"pool HBAR/USDC={self.pool_hbar_usdc:.5f} vs Binance {self.binance_hbar_usdt:.5f} "
                 f"({div*100:+.2f}%)" if div is not None else
-                f"SaucerSwap USDC={self.saucerswap_usdc_usd} | CoinGecko USDC={self.coingecko_usdc_usd} | pool-divergentie n/b")
+                f"Binance USDC/USDT={self.binance_usdc_usdt} | CoinGecko USDC={self.coingecko_usdc_usd} | pool-divergentie n/b")
 
 
 class DepegGuard:
-    def __init__(self):
+    # ------------------------------------------------------------ bronnen
+    def __init__(self, binance_client=None):
         self._pending_since: Optional[float] = None
         self._pending_signals: list = []
         self._last_warn_at = 0.0
         self.last_reading: Optional[DepegReading] = None
+        self._binance = binance_client
 
-    # ------------------------------------------------------------ bronnen
-    @staticmethod
-    def _saucerswap_usdc() -> Optional[float]:
-        import requests
+    def _binance_usdc(self) -> Optional[float]:
         try:
-            r = requests.get(f"https://api.saucerswap.finance/tokens/{USDC_TOKEN_ID}", timeout=10)
-            r.raise_for_status()
-            return float(r.json().get("priceUsd"))
+            if self._binance is None:
+                from binance_klines_client import BinanceKlinesClient
+                self._binance = BinanceKlinesClient()
+            kl = self._binance.get_klines("USDC", interval="1m", limit=1)
+            return float(kl[-1].close) if kl else None
         except Exception:
             return None
 
@@ -92,11 +95,11 @@ class DepegGuard:
         """
         if not DEPEG_ENABLED:
             return False, None
-        ss = self._saucerswap_usdc()
+        ss = self._binance_usdc()
         cg = self._coingecko_usdc()
         signals = []
         if ss is not None and ss < DEPEG_THRESHOLD:
-            signals.append("saucerswap")
+            signals.append("binance")
         if cg is not None and cg < DEPEG_THRESHOLD:
             signals.append("coingecko")
         if pool_hbar_usdc and binance_hbar_usdt:
