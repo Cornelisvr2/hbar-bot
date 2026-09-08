@@ -488,6 +488,7 @@ class RegimeOrchestrator:
                     print("[regime] Gepauzeerd via Telegram -- cyclus overgeslagen.")
                 else:
                     await self._cycle()
+                self._write_bot_state(paused=command_state.paused)
             except Exception as e:
                 import traceback
                 print(f"FOUT in regime_loop: {e}")
@@ -1423,6 +1424,29 @@ class RegimeOrchestrator:
             await self.db.clear_active_lp_position()
             print(f"[regime] Opgeslagen positie {saved['token_id']} bleek al gesloten, "
                   f"database-vermelding opgeruimd.")
+
+    def _write_bot_state(self, paused: bool = False):
+        """(8 sep 2026) Klein statusbestand op de gedeelde logs-map: het
+        dashboard toont hiermee het bot-regime naast de macro-analyse, en
+        het heartbeat-script (heartbeat_check.sh) bewaakt de mtime."""
+        try:
+            import json
+            path = os.environ.get("BOT_STATE_FILE", "/app/logs/bot_state.json")
+            st = self.lp_manager.state if self.lp_manager else None
+            data = {
+                "updated_at": time.time(),
+                "regime": self.current_regime.value,
+                "macro_regime": self._cached_macro_regime,
+                "paused": paused,
+                "position_token_id": st.token_id if (st and st.is_open) else None,
+                "hourly_volatility": self._cached_hourly_volatility,
+            }
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, path)
+        except Exception as e:
+            print(f"[state] statusbestand niet geschreven: {e}")
 
     async def _reconcile_regime_state_on_startup(self):
         """
