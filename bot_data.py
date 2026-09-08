@@ -222,6 +222,8 @@ async def fetch_dashboard_data(db: PostgresClient) -> dict:
             DEFAULT_TICK_SPACING_BY_FEE.get(fee_tier, 30), base.usdc_decimals,
             hbar_price_usd, (1.0 if HEDERA_NETWORK == "mainnet" else sauce_price_usd),
             _snap.volume_24h_usd,
+            volume_1h_usd=_snap.volume_1h_usd,
+            volume_7d_avg_usd=gecko.get_avg_daily_volume_7d(),
             our_liquidity=int(liquidity) if positie else 0,  # on-chain gelezen hierboven
             our_tick_lower=positie["tick_lower"] if positie else None,
             our_tick_upper=positie["tick_upper"] if positie else None,
