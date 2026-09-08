@@ -26,6 +26,7 @@ BINANCE_BASE_URL = "https://api.binance.com/api/v3"
 SYMBOL_BY_ASSET = {
     "BTC": "BTCUSDT",
     "HBAR": "HBARUSDT",
+    "USDC": "USDCUSDT",  # (8 sep 2026) voor de depeg-bewaking
 }
 
 
