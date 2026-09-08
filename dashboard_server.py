@@ -214,6 +214,7 @@ async def _build_dashboard_context() -> dict:
             ) if data["position"] else "",
             "hbar_price_eur": data["hbar_price_usd"] * USD_NAAR_EUR,
             "quote_symbol": "USDC" if HEDERA_NETWORK == "mainnet" else "SAUCE",
+            "macro": _macro_for_dashboard(data.get("macro_regime")),
             "pool_apr_pct": pool_apr * 100,
             "pool_apr_breed_pct": pool_apr_breed * 100,
             "fees_apr_now_pct": pm["fees_apr_now"] * 100 if pm and pm.get("fees_apr_now") is not None else None,
@@ -408,3 +409,19 @@ async def api_logs_stream():
                 yield ": keepalive\n\n"  # houdt de verbinding door Caddy heen open
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ---------------------------------------------------------------------------
+# Meerlaagse macro-analyse (8 sep 2026) -- schaduwmodus, alleen tonen
+# ---------------------------------------------------------------------------
+def _macro_for_dashboard(current_bot_regime):
+    try:
+        from binance_klines_client import BinanceKlinesClient
+        from macro_analysis import compute_macro_analysis
+        m = compute_macro_analysis(BinanceKlinesClient(), current_bot_regime=current_bot_regime)
+        d = m.to_dict()
+        d["computed_at_str"] = datetime.datetime.fromtimestamp(m.computed_at).strftime("%d %b %H:%M")
+        return d
+    except Exception as e:
+        print(f"[waarschuwing] macro-analyse niet beschikbaar: {e}")
+        return None
