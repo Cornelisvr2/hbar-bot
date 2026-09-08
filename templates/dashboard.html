@@ -395,7 +395,13 @@
       <div class="stat-line"><span class="label">Breedte</span><span class="val">{{ "%.1f"|format(d.position.width_pct) if d.position else "—" }}%</span></div>
       <div class="stat-line"><span class="label">Prijs in range</span><span class="val">{{ "%.1f"|format(d.position.in_range_pct) if d.position else "—" }}%</span></div>
       <div class="stat-line"><span class="label">Status</span><span class="val {{ 'status-ok' if d.position and d.position.range_status == 'gezond' else '' }}">{{ d.range_status_label }}</span></div>
-      <div class="stat-line"><span class="label">Fees-APR (balanced range)</span><span class="val">{{ "%.1f"|format(d.pool_apr_pct) }}%</span></div>
+      {% if d.fees_apr_now_pct is not none %}
+      <div class="stat-line"><span class="label">Fees-APR nu (laatste uur ×24)</span><span class="val">{{ "%.1f"|format(d.fees_apr_now_pct) }}% <span style="color: var(--text-muted);">(vol ${{ "{:,.0f}".format(d.volume_1h_usd) }}/u)</span></span></div>
+      {% endif %}
+      <div class="stat-line"><span class="label">Fees-APR 24u (balanced range)</span><span class="val">{{ "%.1f"|format(d.pool_apr_pct) }}%{% if d.volume_24h_usd %} <span style="color: var(--text-muted);">(vol ${{ "{:,.0f}".format(d.volume_24h_usd) }})</span>{% endif %}</span></div>
+      {% if d.fees_apr_7d_pct is not none %}
+      <div class="stat-line"><span class="label">Fees-APR 7d-gemiddeld</span><span class="val">{{ "%.1f"|format(d.fees_apr_7d_pct) }}% <span style="color: var(--text-muted);">(vol ${{ "{:,.0f}".format(d.volume_7d_avg_usd) }}/dag)</span></span></div>
+      {% endif %}
       <div class="stat-line"><span class="label">Fees-APR (hele pool, ter vergelijking)</span><span class="val" style="color: var(--text-muted);">{{ "%.1f"|format(d.pool_apr_breed_pct) }}%</span></div>
       {% if d.lari_our_apr_pct is not none %}
       <div class="stat-line"><span class="label">LARI-APR pool (SaucerSwap-formule)</span><span class="val">{{ "%.1f"|format(d.lari_pool_apr_pct) }}%</span></div>
