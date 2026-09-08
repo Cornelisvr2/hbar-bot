@@ -477,6 +477,9 @@
     <div class="panel-title">Macro-analyse <span style="color: var(--text-muted); font-weight: normal;">(schaduwmodus — beslist nog niets; BTC leidend)</span></div>
     <div class="stat-line"><span class="label">Score / betrouwbaarheid</span><span class="val">{{ "%+.2f"|format(d.macro.score) }} / {{ "%.2f"|format(d.macro.confidence) }}</span></div>
     <div class="stat-line"><span class="label">Regime (macro) vs bot (30d-momentum)</span><span class="val">{{ d.macro.regime }} <span style="color: var(--text-muted);">— {{ d.macro.shadow_vs_current or "n/b" }}</span></span></div>
+    {% if d.bot_state and d.bot_state.regime %}
+    <div class="stat-line"><span class="label">Bot-status</span><span class="val">{{ d.bot_state.regime }}{% if d.bot_state.paused %} <span class="status-bad">(gepauzeerd)</span>{% endif %} <span style="color: var(--text-muted);">— laatste cyclus {{ "%.0f"|format(d.bot_state.age_seconds) }} s geleden</span></span></div>
+    {% endif %}
     <div class="stat-line"><span class="label">Drift-multiplier (range-scheefheid)</span><span class="val">{{ "%+.2f"|format(d.macro.drift_multiplier) }}</span></div>
     <div class="stat-line"><span class="label">Uitlijning</span><span class="val">{{ d.macro.alignment }} <span style="color: var(--text-muted);">— {{ d.macro.alignment_note }}</span></span></div>
     <div class="stat-line"><span class="label">Halving-cyclus</span><span class="val">{{ "%.0f"|format(d.macro.halving_months_since) }} mnd sinds apr 2024 — {{ d.macro.halving_phase }} <span style="color: var(--text-muted);">(bull-demping ×{{ d.macro.halving_bull_damping }})</span></span></div>
