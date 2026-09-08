@@ -1983,6 +1983,8 @@ class RegimeOrchestrator:
                     DEFAULT_TICK_SPACING_BY_FEE.get(cfg.fee_tier, 30), quote_dec,
                     current_price, (1.0 if HEDERA_NETWORK == "mainnet" else current_price),
                     pool_snapshot.volume_24h_usd,
+                    volume_1h_usd=getattr(pool_snapshot, "volume_1h_usd", 0.0),
+                    volume_7d_avg_usd=self.geckoterminal.get_avg_daily_volume_7d(),
                     our_liquidity=our_L,
                     our_tick_lower=st.tick_lower if st.is_open else None,
                     our_tick_upper=st.tick_upper if st.is_open else None,
@@ -1992,9 +1994,11 @@ class RegimeOrchestrator:
                 if os.environ.get("FEES_APR_SOURCE", "pool") == "balanced":
                     self._cached_pool_fees_apr = pm["fees_apr_balanced"]
                 lari = pm["lari"]
-                print(f"[regime] Fees-APR (balanced range +-{pm['range_ticks'][1]-pm['tick_current']} ticks): "
-                      f"{pm['fees_apr_balanced']*100:.1f}% (TVL in venster=${pm['tvl_in_range_usd']:,.0f}, "
-                      f"{pm['initialized_ticks']} ticks)"
+                _now = f"{pm['fees_apr_now']*100:.1f}%" if pm.get('fees_apr_now') is not None else "n/b"
+                _7d = f"{pm['fees_apr_7d']*100:.1f}%" if pm.get('fees_apr_7d') is not None else "n/b"
+                print(f"[regime] Fees-APR (balanced range +-{pm['range_ticks'][1]-pm['tick_current']} ticks, "
+                      f"TVL in venster=${pm['tvl_in_range_usd']:,.0f}): nu {_now} | 24u {pm['fees_apr_balanced']*100:.1f}% | "
+                      f"7d {_7d}"
                       + (f" | LARI pool-APR {lari.pool_reward_apr*100:.1f}%, ons L-aandeel {lari.our_liquidity_share*100:.3f}%"
                          f" ≈ ${lari.our_reward_per_epoch_usd:.2f}/epoch" if lari else ""))
             except Exception as e:
