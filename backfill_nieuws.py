@@ -5,6 +5,8 @@ Bronnen:
   coindesk  CoinDesk Data API (voormalig CryptoCompare), nieuwsarchief van
             100+ uitgevers, gepagineerd terug in de tijd. COINDESK_API_KEY.
             Koppen worden op trefwoord aan BTC en/of HBAR gekoppeld.
+  gnews     Google News RSS met after:/before: in weekvensters (keyloos,
+            reserve voor het crypto-archief; "bitcoin" en "hedera OR hbar")
   gdelt     GDELT DOC 2.0 (keyloos): wereldnieuws per dag op macro-
             trefwoorden (Fed, Treasury, tarieven, Iran, olie, CPI ...).
             Max 250 per query -> per dag één query per trefwoordgroep.
@@ -131,6 +133,49 @@ def haal_gdelt(dagen: int):
         dag = volgende
 
 
+GNEWS_QUERIES = {"BTC": "bitcoin", "HBAR": "hedera OR hbar"}
+
+
+def haal_gnews(dagen: int):
+    """
+    Keyloze reserve voor het crypto-archief (10 sep 2026, CoinDesk-key
+    werd geweigerd): Google News RSS met after:/before: in weekvensters,
+    ~100 koppen per venster. Onofficieel; bij een leeg antwoord of 429
+    wordt het venster overgeslagen en later opnieuw geprobeerd.
+    """
+    import feedparser
+    from email.utils import parsedate_to_datetime
+    einde = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = einde - timedelta(days=dagen)
+    venster = start
+    while venster < einde:
+        tot = min(venster + timedelta(days=7), einde)
+        for asset, q in GNEWS_QUERIES.items():
+            url = ("https://news.google.com/rss/search?q=" + requests.utils.quote(f"{q} after:{venster:%Y-%m-%d} before:{tot:%Y-%m-%d}")
+                   + "&hl=en-US&gl=US&ceid=US:en")
+            try:
+                r = requests.get(url, headers=UA, timeout=30)
+                if r.status_code != 200:
+                    print(f"[gnews] {asset} {venster:%Y-%m-%d}: HTTP {r.status_code}", flush=True)
+                    time.sleep(5)
+                    continue
+                d = feedparser.parse(r.text)
+                for e in d.entries:
+                    try:
+                        ts = int(parsedate_to_datetime(e.published).timestamp())
+                    except Exception:
+                        continue
+                    titel = (e.title or "").strip()
+                    bron = getattr(getattr(e, "source", None), "title", "") or ""
+                    yield asset, titel, ts, bron, getattr(e, "link", "")
+            except Exception as ex:
+                print(f"[gnews] {asset} {venster:%Y-%m-%d}: {ex}", flush=True)
+            time.sleep(1.5)
+        if venster.day <= 7:
+            print(f"[gnews] {venster:%Y-%m}", flush=True)
+        venster = tot
+
+
 async def ophalen(dagen: int, bronnen: list[str]):
     from postgres_client import PostgresClient
     db = PostgresClient()
@@ -155,6 +200,8 @@ async def ophalen(dagen: int, bronnen: list[str]):
             print("COINDESK_API_KEY ontbreekt -- coindesk overgeslagen")
         else:
             gens.append(("coindesk_archive", haal_coindesk(dagen, key)))
+    if "gnews" in bronnen:
+        gens.append(("gnews_archive", haal_gnews(dagen)))
     if "gdelt" in bronnen:
         gens.append(("gdelt", haal_gdelt(dagen)))
 
@@ -238,7 +285,7 @@ def main():
     a = sys.argv
     dagen = int(a[a.index("--dagen") + 1]) if "--dagen" in a else 730
     if "--ophalen" in a:
-        bronnen = a[a.index("--bron") + 1].split(",") if "--bron" in a else ["coindesk", "gdelt"]
+        bronnen = a[a.index("--bron") + 1].split(",") if "--bron" in a else ["coindesk", "gnews", "gdelt"]
         asyncio.run(ophalen(dagen, bronnen))
     elif "--classificeren" in a:
         limit = int(a[a.index("--limit") + 1]) if "--limit" in a else None
