@@ -187,6 +187,7 @@ Je beoordeelt GEEN richting (bullish/bearish) -- dat leert de bot zelf uit de ko
 Je bepaalt alleen WAT voor nieuws dit is, OVER WIE het gaat, of het NIEUW is en hoe GROOT het kan zijn.
 Wees streng op nieuwheid: een kop die een bekend feit becommentarieert, samenvat of voorspelt is 'commentaar'.
 Koersanalyses, 'price prediction', 'is dit de bodem?', meningen van analisten = category 'marktcommentaar', novelty 'commentaar', magnitude 1.
+Voor algemeen nieuws (feed MACRO): entity 'macro'; category 'macro_fed' (Fed/rente/Treasury/inflatiecijfers), 'geopolitiek' (conflict, sancties, olie), 'handel_tarieven' of 'regulering_etf'. Alleen nieuws dat de financiële markten raakt krijgt magnitude >= 3; sport, entertainment en lokaal nieuws krijgen 1.
 event_key: korte canonieke naam van de onderliggende gebeurtenis in het Engels, zonder datum, zodat meerdere koppen over dezelfde gebeurtenis dezelfde key krijgen (bv. 'SEC decision HBAR ETF', 'Liquid sidechain pause', 'US CPI release')."""
 
 CLASSIFY_TOOL_SCHEMA = {
@@ -198,8 +199,8 @@ CLASSIFY_TOOL_SCHEMA = {
             "category": {"type": "string", "enum": [
                 "regulering_etf", "listing_exchange", "hack_security", "macro_fed",
                 "adoption_partnership", "tokenomics_unlock", "protocol_upgrade",
-                "marktcommentaar", "overig"]},
-            "entity": {"type": "string", "enum": ["BTC", "HBAR", "markt_breed", "andere_coin"]},
+                "geopolitiek", "handel_tarieven", "marktcommentaar", "overig"]},
+            "entity": {"type": "string", "enum": ["BTC", "HBAR", "markt_breed", "andere_coin", "macro"]},
             "novelty": {"type": "string", "enum": ["nieuw_feit", "update", "commentaar"]},
             "magnitude_guess": {"type": "integer", "minimum": 1, "maximum": 5,
                                  "description": "1 = irrelevant, 3 = kan de koers van deze asset merkbaar bewegen, 5 = marktschok (hack, verbod, ETF-besluit, Fed-verrassing)"},

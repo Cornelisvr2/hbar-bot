@@ -86,6 +86,25 @@ RSS_FEEDS_BY_ASSET = {
         # van de exacte tag-URL-structuur van een specifieke nieuwssite.
         "https://news.google.com/rss/search?q=hedera+hbar+when:7d&hl=en-US&gl=US&ceid=US:en",
     ],
+    # ALGEMEEN/MACRO-NIEUWS (10 sep 2026, op verzoek): Fed, Treasury
+    # (Bessent), tarieven, geopolitiek (Iran, sancties, olie), recessie.
+    # Voedt ALLEEN news_events (classificatie + event-study), geen
+    # richtingsscore -- het gaat over de hele markt, niet over HBAR.
+    # Alle bronnen keyloos. Google-News-query's zijn bewust smal: algemeen
+    # nieuws is honderden koppen per dag, alleen het marktrelevante deel
+    # mag door.
+    "MACRO": [
+        "https://feeds.apnews.com/rss/apf-business",
+        "https://feeds.apnews.com/rss/apf-topnews",
+        "https://www.cnbc.com/id/10000664/device/rss/rss.html",   # CNBC Economy
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html",  # CNBC Top News
+        "https://feeds.bbci.co.uk/news/business/rss.xml",
+        "https://news.google.com/rss/search?q=(Federal+Reserve+OR+Powell+OR+FOMC)+when:1d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=(Bessent+OR+Treasury+Secretary)+when:1d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=(tariffs+OR+trade+war)+markets+when:1d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=(Iran+OR+Israel+OR+Russia+OR+Taiwan)+(strike+OR+attack+OR+sanctions+OR+war)+when:1d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=(oil+prices+OR+recession+OR+inflation+data)+when:1d&hl=en-US&gl=US&ceid=US:en",
+    ],
 }
 
 # Simpele keyword-filter voor de bredere feeds, om te voorkomen dat elk
@@ -94,6 +113,14 @@ RSS_FEEDS_BY_ASSET = {
 ASSET_KEYWORDS = {
     "BTC": ["bitcoin", "btc"],
     "HBAR": ["hedera", "hbar", "hashgraph"],
+    # MACRO: trefwoordpoort -- zonder minstens één van deze woorden is een
+    # algemene kop (sport, entertainment, lokaal) niet marktrelevant.
+    "MACRO": ["fed ", "federal reserve", "powell", "fomc", "rate cut", "rate hike", "interest rate",
+              "bessent", "treasury", "tariff", "trade war", "sanction", "iran", "israel", "russia",
+              "ukraine", "taiwan", "china", " oil ", "crude", "opec", "inflation", "cpi", "jobs report",
+              "payrolls", "recession", "gdp", "stock market", "wall street", "s&p", "nasdaq",
+              "dollar", " bond", "yield", "debt ceiling", "shutdown", "trump", "white house",
+              "sec ", "regulat", "crypto", "bitcoin", "stablecoin"],
 }
 
 # Automatisch gegenereerde valuta-omreken-pagina's (bv. van Bybit) bevatten

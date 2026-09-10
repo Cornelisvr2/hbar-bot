@@ -35,6 +35,9 @@ from typing import Optional
 from rss_news_client import RssNewsClient
 from rss_news_client import normalize_headline
 
+MACRO_MIN_MAGNITUDE = int(os.environ.get("MACRO_MIN_MAGNITUDE", "3"))   # alleen marktrelevant algemeen nieuws bewaren
+MACRO_MAX_PER_REFRESH = int(os.environ.get("MACRO_MAX_PER_REFRESH", "25"))  # kostenrem op LLM-calls per verversing
+
 SENTIMENT_BIAS_BY_ASSET = {
     "BTC": float(os.environ.get("SENTIMENT_BIAS_BTC", "0.17")),
     "HBAR": float(os.environ.get("SENTIMENT_BIAS_HBAR", "0.27")),
@@ -1875,9 +1878,57 @@ class RegimeOrchestrator:
                     f"HANDMATIGE CONTROLE DRINGEND VEREIST.",
                 )
 
+    async def _verwerk_macro_nieuws(self):
+        items = self.rss_news.fetch_news("MACRO", max_age_hours=4.0)
+        nieuw = [i for i in items if i.id not in self._processed_news_ids]
+        if not nieuw:
+            return
+        try:
+            bekend = {normalize_headline(h) for h in await self.db.recent_headlines(24.0)}
+        except Exception:
+            bekend = set()
+        try:
+            async with self.db._pool.acquire() as conn:
+                rows = await conn.fetch("SELECT headline_key FROM news_events WHERE created_at > now() - interval '48 hours'")
+            bekend |= {r["headline_key"] for r in rows}
+        except Exception:
+            pass
+        gezien, bewaard, gezien_n = set(), 0, 0
+        for i in nieuw:
+            self._processed_news_ids.add(i.id)
+            sleutel = normalize_headline(i.title)
+            if not sleutel or sleutel in bekend or sleutel in gezien:
+                continue
+            gezien.add(sleutel)
+            gezien_n += 1
+            if gezien_n > MACRO_MAX_PER_REFRESH:
+                break
+            cls = self.llm.classify_headline("MACRO", i.title)
+            if cls is None or cls.magnitude_guess < MACRO_MIN_MAGNITUDE:
+                continue
+            await self.db.log_news_event(
+                asset="MACRO", headline=i.title, headline_key=sleutel, published_at=i.published_at,
+                source_feed=i.source_feed, url=i.url, category=cls.category, entity=cls.entity,
+                novelty=cls.novelty, magnitude_guess=cls.magnitude_guess, event_key=cls.event_key,
+                rationale=cls.rationale,
+            )
+            bewaard += 1
+            print(f"[nieuws] MACRO: {cls.category}/{cls.novelty} m={cls.magnitude_guess} [{cls.event_key}] {i.title[:60]}")
+        if gezien_n:
+            print(f"[nieuws] MACRO: {gezien_n} nieuwe koppen beoordeeld, {bewaard} relevant bewaard.")
+
     async def _refresh_sentiment_if_due(self):
         if (time.time() - self._last_sentiment_refresh) < SENTIMENT_REFRESH_SECONDS:
             return
+
+        # ALGEMEEN NIEUWS (10 sep 2026): aparte tak -- alleen classificeren
+        # en bewaren (news_events), geen richtingsscore, geen invloed op de
+        # regime-beslissing. Alleen koppen met omvang >= MACRO_MIN_MAGNITUDE
+        # worden opgeslagen; de rest is voor de markt niet relevant.
+        try:
+            await self._verwerk_macro_nieuws()
+        except Exception as e:
+            print(f"[nieuws] MACRO-tak mislukt (niet kritiek): {e}")
 
         for asset in ("BTC", "HBAR"):
             items = self.rss_news.fetch_news(asset, max_age_hours=4.0)
