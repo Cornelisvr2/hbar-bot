@@ -16,6 +16,20 @@ votes waren aanvullend).
 
 import time
 import hashlib
+import re
+
+
+def normalize_headline(title: str) -> str:
+    """
+    NIEUW (10 sep 2026): sleutel voor ontdubbeling over bronnen en
+    herstarts heen. Kleine letters, bron-suffix ("... - CoinDesk") weg,
+    alleen letters/cijfers, enkele spaties. "majors' losses" en
+    "majors losses" worden zo dezelfde sleutel.
+    """
+    t = (title or "").lower()
+    t = re.sub(r"\s+[-|–—]\s+[a-z0-9 .&']{2,30}$", "", t)  # " - CoinDesk", " | The Block"
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
 import feedparser
 from dataclasses import dataclass
 from typing import List, Optional

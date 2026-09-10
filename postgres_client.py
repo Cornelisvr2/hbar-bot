@@ -56,6 +56,21 @@ class PostgresClient:
             )
             return row["id"]
 
+    async def recent_headlines(self, hours: float = 24.0) -> list[str]:
+        """
+        NIEUW (10 sep 2026): headlines uit sentiment_log van de laatste
+        `hours` uur -- voor ontdubbeling die een herstart overleeft (de
+        in-memory set _processed_news_ids gaat bij elke herstart leeg,
+        waardoor alle nieuws van de afgelopen 4u opnieuw gescoord en
+        opnieuw meegewogen werd).
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT headline FROM sentiment_log WHERE created_at > now() - ($1 || ' hours')::interval",
+                str(hours),
+            )
+            return [r["headline"] for r in rows]
+
     async def log_strategy_signal(self, direction: str, confidence: float, position_fraction: float,
                                     btc_score: float, hbar_score: float,
                                     panic_override_triggered: bool = False, reasoning: str = "") -> int:

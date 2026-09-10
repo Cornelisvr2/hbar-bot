@@ -33,6 +33,7 @@ from enum import Enum
 from typing import Optional
 
 from rss_news_client import RssNewsClient
+from rss_news_client import normalize_headline
 from messari_news_client import MessariNewsClient
 from llm_sentiment_engine import LlmSentimentEngine
 from geckoterminal_client import GeckoTerminalClient
@@ -1877,6 +1878,27 @@ class RegimeOrchestrator:
             # Messari-API-structuur.
             # items += self.messari_news.fetch_news(asset, max_age_hours=4.0)
             new_items = [i for i in items if i.id not in self._processed_news_ids]
+            # ONTDUBBELING over herstarts en bronnen heen (10 sep 2026):
+            # sentiment_log van de laatste 24u is de waarheid, niet de
+            # in-memory set. Zelfde kop via een andere link (Google News
+            # vs. CoinDesk) of na een herstart wordt niet opnieuw gescoord
+            # en telt dus niet dubbel mee in de combined score.
+            try:
+                bekend = {normalize_headline(h) for h in await self.db.recent_headlines(24.0)}
+            except Exception as e:
+                logger.warning(f"Ontdubbeling via sentiment_log mislukt ({e}) -- alleen in-memory set gebruikt.")
+                bekend = set()
+            uniek, gezien = [], set()
+            for i in new_items:
+                sleutel = normalize_headline(i.title)
+                if not sleutel or sleutel in bekend or sleutel in gezien:
+                    self._processed_news_ids.add(i.id)
+                    continue
+                gezien.add(sleutel)
+                uniek.append(i)
+            if len(uniek) < len(new_items):
+                logger.info(f"{asset}: {len(new_items) - len(uniek)} dubbele headline(s) overgeslagen.")
+            new_items = uniek
             if not new_items:
                 continue
 
