@@ -1,0 +1,457 @@
+diff --git a/PLAN_NIEUWS_MACRO.md b/PLAN_NIEUWS_MACRO.md
+new file mode 100644
+index 0000000..a8d09b0
+--- /dev/null
++++ b/PLAN_NIEUWS_MACRO.md
+@@ -0,0 +1,176 @@
++# Plan: nieuws en data in de macro-laag, en leren wat écht de markt beweegt
++
++Datum: 10 sep 2026, op verzoek. Vervangt/verfijnt de sectie "Nieuws-tijdlijn,
++extra nieuwsbronnen en zelflerend sentiment" in PLAN.md.
++
++## 0. Vertrekpunt en wat de kalibratie ons leerde
++
++- De macro-analyse (macro_analysis.py, 8 sep) heeft vijf lagen: halving-prior,
++  MA200-marktstatus, trend per horizon (6m/1m/7d/24h), uitlijning, eindscore
++  met drift-multiplier. Data: alleen Binance-candles. Draait in schaduwmodus.
++- De nieuwslaag (RSS -> Claude Haiku -> sentiment_log -> combined score)
++  geeft een RICHTINGSscore per kop. Kalibratie 10 sep (252 unieke koppen):
++  Spearman met de 1u/4u-beweging is ~0, hit-rate ~50%, en de LLM heeft een
++  positieve bias (+0,17 BTC, +0,27 HBAR in een dalende markt).
++- Conclusie: de LLM raden laten wat de koers doet werkt niet. De LLM kan wel
++  iets anders goed: CLASSIFICEREN (wat voor nieuws is dit, over wie, is het
++  nieuw, hoe groot). De richting en het gewicht moeten uit de markt zelf
++  komen (event-study). Dat is het hart van dit plan.
++
++## 1. Architectuur: twee snelheden, één plek van waarheid
++
++```
++              +---------------------------+
++ bronnen  --> |  news_raw (alle koppen)   |  ontdubbeld, ruisfilter (bestaat)
++              +------------+--------------+
++                           | LLM: classificatie (geen richting)
++              +------------v--------------+
++              |  news_events              |  categorie, entiteit, nieuwheid,
++              |  (1 rij per gebeurtenis)  |  omvang-schatting, bron
++              +------+-------------+------+
++                     |             |
++       SNEL (15 min) |             | LANGZAAM (dagelijks/wekelijks)
++                     v             v
++     flash-verdediging      event-study: abnormale beweging per
++     (bestaat; alleen bij   gebeurtenis -> geleerde gewichten per
++     omvang>=4 en nieuw)    categorie/bron -> narrative index (7d)
++                                   |
++                                   v
++                        macro_analysis: laag 6 "narratief & flows"
++                        + laag 7 "event-risico-kalender"
++```
++
++- Snel pad: alleen voor schokken (hack, depeg, verbod, ETF-besluit). Bestaat
++  al (flash_event_model); wordt gevoed door omvang+nieuwheid i.p.v. de
++  richtingsscore.
++- Langzaam pad: sluit aan op de macro-analyse, in dezelfde schaduw-eerst-
++  discipline: loggen, vergelijken, dan pas laten sturen.
++
++## 2. Data-API's voor de macro-laag (naast nieuws)
++
++Gratis tenzij anders vermeld. Cadans = hoe vaak ophalen.
++
++### 2a. Marktstructuur en geldstromen (leidend voor bull/bear)
++| Bron | Wat | Cadans | Key |
++|---|---|---|---|
++| Binance Futures REST (`fapi.binance.com`) | funding rate (`/fapi/v1/fundingRate`), open interest historie (`/futures/data/openInterestHist`), long/short-ratio, taker buy/sell — BTCUSDT én HBARUSDT | 1u | geen |
++| CoinGecko publiek endpoint (`/global`, `/coins/{id}`) | BTC-dominantie, totale markt-cap, stablecoin-marktkapitalisatie | 1x/dag | geen (keyloos volstaat bij 1 call/dag; Demo-plan bleek betaald, ~€30/mnd, niet nodig) |
++| alternative.me `/fng/` | Fear & Greed-index (historie beschikbaar) | 1x/dag | geen |
++| DefiLlama (`api.llama.fi`) | TVL Hedera-chain, stablecoin-supply per chain, DEX-volumes | 1x/dag | geen |
++| Farside Investors (webpagina, geen API) | dagelijkse BTC-ETF-in/uitstromen — de belangrijkste "flow"-reeks van deze cyclus | 1x/dag scrape | geen; als scrapen te fragiel: CoinGlass (betaald) |
++
++### 2b. On-chain (HBAR-specifiek — dit heeft niemand anders in zijn score)
++| Bron | Wat | Cadans | Key |
++|---|---|---|---|
++| Hedera Mirror Node REST (`mainnet-public.mirrornode.hedera.com`) | transactievolume, nieuwe accounts, staking-totaal, HTS-activiteit, TPS | 1x/uur | geen |
++| SaucerSwap API / GeckoTerminal (client bestaat) | pool-volume en TVL WHBAR/USDC, aantal swaps | 1x/uur | geen |
++| mempool.space / blockchain.com | BTC-hashrate, fees, mempool-grootte (netwerkstress) | 1x/dag | geen |
++
++### 2c. Macro-economie
++| Bron | Wat | Cadans | Key |
++|---|---|---|---|
++| FRED API (St. Louis Fed) | DXY (DTWEXBGS), 10j-rente (DGS10), 2j (DGS2), reële rente (DFII10), Fed funds (DFF), M2, VIX (VIXCLS), S&P 500 (SP500) | 1x/dag | gratis key |
++| Financial Modeling Prep, gratis tier | economische kalender (FOMC, CPI, NFP) met verwachting/uitkomst | 1x/dag | gratis key, 250 calls/dag |
++| Forex Factory `ff_calendar_thisweek.json` | zelfde kalender, reserve | 1x/dag | geen |
++| yfinance (onofficieel) | intraday NDX/goud/DXY als FRED te traag is | fallback | geen |
++
++### 2d. Geplande crypto-gebeurtenissen en regulering
++| Bron | Wat | Cadans | Key |
++|---|---|---|---|
++| CoinMarketCal API | geplande events (upgrades, listings, conferenties) per coin | 1x/dag | gratis key |
++| SEC EDGAR full-text search (`efts.sec.gov/LATEST/search-index`) | ETF-filings (19b-4, S-1) met "Hedera"/"HBAR"; besluitdata | 1x/dag | geen |
++| Federal Register API | regelgeving crypto (Treasury, SEC, CFTC) | 1x/dag | geen |
++| Hedera treasury/HBAR Foundation-rapporten (webpagina) | vrijgaveschema HBAR (aanbodschokken) | 1x/maand | geen |
++
++### 2e. Nieuws zelf (uit het eerdere plan, ongewijzigd)
++GDELT DOC 2.0 (algemeen/financieel, gratis), CryptoPanic (client bestaat),
++CryptoCompare News (gratis key), RSS uitbreiden (The Block, Decrypt,
++Hedera-blog, HBAR Foundation, SaucerSwap). Betaald pas als nodig: CoinGecko
++Analyst-plan. NIET: Finnhub (geen gratis tier meer).
++
++Benodigde keys: FRED (binnen), FMP (binnen), CoinMarketCal, CryptoCompare.
++Alle andere bronnen zijn keyloos. Stand 10 sep 2026.
++
++## 3. Leren wat relevant is (en ruis negeren)
++
++### Stap A — de LLM een andere vraag stellen
++Vervang "is dit bullish/bearish?" door een classificatie met gedwongen
++JSON-schema (zelfde tool-use-mechaniek als nu):
++- `category`: regulering/ETF · listing/exchange · hack/security · macro-Fed ·
++  adoption/partnership · tokenomics/unlock · protocol-upgrade ·
++  marktcommentaar · overig
++- `entity`: BTC · HBAR · markt-breed · andere coin
++- `novelty`: nieuw feit / update op bekend feit / commentaar op bekend feit
++- `magnitude_guess`: 1–5 (LLM-inschatting van hoe groot dit KAN zijn)
++- `event_key`: korte canonieke naam ("SEC-besluit HBAR-ETF") zodat meerdere
++  koppen over hetzelfde tot één gebeurtenis clusteren
++Geen richting meer. Kosten gelijk aan nu (één Haiku-call per unieke kop).
++
++### Stap B — de markt laten labelen (event-study, dagelijks via cron)
++Per gebeurtenis (niet per kop) achteraf berekenen, uit Binance 5-min-candles:
++- abnormaal rendement op +1u/+4u/+24u = rendement minus de normale
++  verwachting (0) gedeeld door de normale volatiliteit van dat uur (uit
++  gbm_range_model) -> een z-score, vergelijkbaar over dagen en assets
++- abnormaal volume op dezelfde horizons
++- voor HBAR: excess t.o.v. BTC (beta uit 30d-regressie i.p.v. 1)
++- "al ingeprijsd": beweging op −1u vóór de eerste kop
++Opslag: `news_events` krijgt kolommen `abn_ret_1h/4h/24h`, `abn_vol_*`,
++`pre_move_1h`, gevuld zodra de horizon verstreken is.
++
++### Stap C — gewichten leren (wekelijks via cron, zoals recalibrate_cron)
++Tabel `news_weights(asset, category, novelty, source) -> gewicht`:
++- gewicht = gemiddelde |abnormale beweging| van die groep, gedeeld door het
++  basisniveau (gemiddelde |beweging| rond willekeurige momenten), met
++  krimping naar 1 bij weinig waarnemingen (n<20)
++- richting per groep = tekenconsistentie van de excess-return; alleen
++  gebruiken als die > 65% is over n>=20, anders richtingloos
++- groepen met gewicht <= 1,1 (niet beter dan toeval) = RUIS: gewicht 0.
++  Verwachting: "marktcommentaar", "commentaar op bekend feit" en de meeste
++  Google-News-bronnen belanden hier vanzelf. Dat is het zelflerende
++  ruisfilter — het regelfilter van 10 sep blijft ervoor staan als goedkope
++  eerste zeef.
++- bronbetrouwbaarheid = zelfde berekening per bron; bronnen die structureel
++  ná de beweging publiceren (pre_move groot, abn_ret klein) krijgen laag
++  gewicht, ongeacht de inhoud.
++Pas na >= 1.000 gelabelde gebeurtenissen: logistische regressie op
++Claude-embeddings + categorie als vervanging van de opzoektabel. Eerder niet.
++
++### Stap D — koppeling aan de macro-analyse
++- Laag 6 "narratief & flows": narrative_index(asset) = som over 7 dagen van
++  gewicht × richting × verval(halfwaardetijd 2 dagen), plus de flow-reeksen
++  uit 2a (ETF-flows, funding, stablecoin-supply) elk genormaliseerd op hun
++  eigen 90d-z-score. Startgewicht in de eindscore: 0,15 (kleinste laag).
++- Laag 7 "event-risico-kalender": FOMC/CPI/NFP, ETF-besluitdata, grote
++  unlocks. Binnen ±2u van zo'n moment: geen nieuwe reflex-entries, range
++  breder. Dit is de betrouwbaarste toepassing van nieuws, want de tijd is
++  vooraf bekend.
++- Flash-verdediging (snel pad): trigger op magnitude_guess >= 4 én
++  novelty = nieuw feit én categorie in {hack, regulering, depeg, macro-Fed},
++  i.p.v. op een sprong in de richtingsscore.
++- De huidige richtingsscore: gewicht in de combined score naar nul zodra
++  laag 6 in schaduw meeloopt; tot die tijd recentreren op het 30d-gemiddelde
++  per asset (bias-correctie).
++
++### Stap E — meten of het werkt (elke maand, vast script)
++- kalibratie_sentiment.py uitbreiden naar news_events: per categorie de
++  abnormale beweging t.o.v. basisniveau; |magnitude_guess| vs |beweging|;
++  horizon 24u erbij.
++- Succescriterium laag 6: Spearman(narrative_index, 7d-forward excess
++  return) > 0,15 over >= 8 weken schaduw. Onder die grens blijft het schaduw.
++- Succescriterium ruisfilter: aandeel koppen met gewicht 0 stijgt, terwijl
++  het aantal gemiste flash-events (achteraf: |abn_ret_1h| > 3 z zonder
++  gebeurtenis in de log) niet toeneemt.
++
++## 4. Volgorde en doorlooptijd
++
++| Fase | Wat | Wanneer |
++|---|---|---|
++| 1 | Tabellen `news_raw`, `news_events`, `news_weights`; LLM-prompt naar classificatie (stap A); richtingsscore recentreren; nieuws-tijdlijn op dashboard | deze week |
++| 2 | Bronnen 2e + keyloze data 2a/2b/2c inladen naar `macro_inputs(ts, bron, reeks, waarde)`; kalender (laag 7) meteen actief — dat is risicobeheer, geen voorspelling | week 2 |
++| 3 | Event-study-cron (stap B) en gewichten-cron (stap C) draaien, alleen loggen | week 2–3, daarna verzamelen |
++| 4 | Laag 6 in schaduw naast de bestaande macro-score; maandelijkse meting (stap E) | vanaf week 4, minimaal 8 weken |
++| 5 | Pas bij gehaald criterium: laag 6 laat range-asymmetrie sturen; embeddings-model overwegen | ~week 12+ |
++
++Wat we NIET doen: de LLM richting laten raden, nieuws als koop/verkoop-
++signaal, betaalde data voordat de gratis reeksen bewezen bijdragen, en het
++model laten sturen vóór acht weken schaduw.
+diff --git a/db_schema.sql b/db_schema.sql
+index e69de29..5b5c9b1 100644
+--- a/db_schema.sql
++++ b/db_schema.sql
+@@ -0,0 +1,48 @@
++-- Fase 1 nieuws/macro-plan (10 sep 2026): classificatie per gebeurtenis
++-- (geen richting) + plek voor de markt-labels uit de event-study.
++-- Draaien op een bestaande database (db_schema.sql loopt alleen bij een
++-- verse volume):  docker compose exec -T database psql -U hbar_bot -d hbar_bot < migratie_news_events.sql
++CREATE TABLE IF NOT EXISTS news_events (
++    id              BIGSERIAL PRIMARY KEY,
++    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
++    published_at    TIMESTAMPTZ,
++    asset           TEXT NOT NULL,              -- feed waaruit de kop kwam (BTC/HBAR)
++    headline        TEXT NOT NULL,
++    headline_key    TEXT NOT NULL,              -- genormaliseerd (rss_news_client.normalize_headline)
++    source_feed     TEXT,
++    url             TEXT,
++    -- LLM-classificatie (geen richting)
++    category        TEXT NOT NULL,              -- regulering_etf | listing_exchange | hack_security | macro_fed | adoption_partnership | tokenomics_unlock | protocol_upgrade | marktcommentaar | overig
++    entity          TEXT NOT NULL,              -- BTC | HBAR | markt_breed | andere_coin
++    novelty         TEXT NOT NULL,              -- nieuw_feit | update | commentaar
++    magnitude_guess SMALLINT NOT NULL,          -- 1..5
++    event_key       TEXT NOT NULL,              -- canonieke naam, clustert koppen over dezelfde gebeurtenis
++    llm_rationale   TEXT,
++    -- Markt-labels (event-study, later gevuld door cron)
++    pre_move_1h     DOUBLE PRECISION,
++    abn_ret_1h      DOUBLE PRECISION,
++    abn_ret_4h      DOUBLE PRECISION,
++    abn_ret_24h     DOUBLE PRECISION,
++    abn_vol_1h      DOUBLE PRECISION,
++    abn_vol_4h      DOUBLE PRECISION,
++    exc_ret_1h      DOUBLE PRECISION,           -- alleen HBAR: t.o.v. BTC
++    exc_ret_4h      DOUBLE PRECISION,
++    exc_ret_24h     DOUBLE PRECISION,
++    labeled_at      TIMESTAMPTZ
++);
++CREATE INDEX IF NOT EXISTS news_events_created_idx ON news_events (created_at);
++CREATE INDEX IF NOT EXISTS news_events_event_key_idx ON news_events (event_key);
++CREATE UNIQUE INDEX IF NOT EXISTS news_events_asset_headline_key_idx ON news_events (asset, headline_key);
++
++-- Geleerde gewichten (wekelijkse cron, fase 3); nu al aangemaakt zodat de
++-- code er vanaf het begin tegenaan kan lezen (leeg = gewicht 1 overal).
++CREATE TABLE IF NOT EXISTS news_weights (
++    asset       TEXT NOT NULL,
++    dimension   TEXT NOT NULL,                  -- category | novelty | source
++    value       TEXT NOT NULL,
++    weight      DOUBLE PRECISION NOT NULL,      -- |abnormale beweging| / basisniveau; 0 = ruis
++    direction   DOUBLE PRECISION,               -- +1/-1 als tekenconsistentie > 65% over n>=20, anders NULL
++    n           INTEGER NOT NULL,
++    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
++    PRIMARY KEY (asset, dimension, value)
++);
+diff --git a/llm_sentiment_engine.py b/llm_sentiment_engine.py
+index f895a32..f1495c9 100644
+--- a/llm_sentiment_engine.py
++++ b/llm_sentiment_engine.py
+@@ -182,11 +182,78 @@ class LlmSentimentResult:
+     headline: str
+ 
+ 
++CLASSIFY_SYSTEM_PROMPT = """Je bent een nieuwsclassificeerder voor een crypto-handelsbot (assets: BTC en HBAR/Hedera).
++Je beoordeelt GEEN richting (bullish/bearish) -- dat leert de bot zelf uit de koersreactie.
++Je bepaalt alleen WAT voor nieuws dit is, OVER WIE het gaat, of het NIEUW is en hoe GROOT het kan zijn.
++Wees streng op nieuwheid: een kop die een bekend feit becommentarieert, samenvat of voorspelt is 'commentaar'.
++Koersanalyses, 'price prediction', 'is dit de bodem?', meningen van analisten = category 'marktcommentaar', novelty 'commentaar', magnitude 1.
++event_key: korte canonieke naam van de onderliggende gebeurtenis in het Engels, zonder datum, zodat meerdere koppen over dezelfde gebeurtenis dezelfde key krijgen (bv. 'SEC decision HBAR ETF', 'Liquid sidechain pause', 'US CPI release')."""
++
++CLASSIFY_TOOL_SCHEMA = {
++    "name": "record_news_classification",
++    "description": "Registreert de classificatie van een crypto-nieuwskop (zonder richting).",
++    "input_schema": {
++        "type": "object",
++        "properties": {
++            "category": {"type": "string", "enum": [
++                "regulering_etf", "listing_exchange", "hack_security", "macro_fed",
++                "adoption_partnership", "tokenomics_unlock", "protocol_upgrade",
++                "marktcommentaar", "overig"]},
++            "entity": {"type": "string", "enum": ["BTC", "HBAR", "markt_breed", "andere_coin"]},
++            "novelty": {"type": "string", "enum": ["nieuw_feit", "update", "commentaar"]},
++            "magnitude_guess": {"type": "integer", "minimum": 1, "maximum": 5,
++                                 "description": "1 = irrelevant, 3 = kan de koers van deze asset merkbaar bewegen, 5 = marktschok (hack, verbod, ETF-besluit, Fed-verrassing)"},
++            "event_key": {"type": "string", "description": "Canonieke gebeurtenisnaam, Engels, max 6 woorden, geen datum."},
++            "rationale": {"type": "string", "description": "Eén zin."},
++        },
++        "required": ["category", "entity", "novelty", "magnitude_guess", "event_key", "rationale"],
++    },
++}
++
++
++@dataclass
++class NewsClassification:
++    category: str
++    entity: str
++    novelty: str
++    magnitude_guess: int
++    event_key: str
++    rationale: str
++
++
+ class LlmSentimentEngine:
+     def __init__(self, api_key: Optional[str] = None, model: str = LLM_MODEL):
+         self.client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+         self.model = model
+ 
++    def classify_headline(self, asset: str, headline: str) -> Optional[NewsClassification]:
++        """
++        FASE 1 nieuws/macro-plan (10 sep 2026): classificatie ZONDER richting.
++        Draait naast analyze_headline() (de richtingsscore blijft voorlopig
++        bestaan voor de flash-verdediging en de combined score); de
++        classificatie gaat naar news_events, waar de event-study-cron de
++        markt-labels aan toevoegt. Retourneert None bij een fout -- nooit
++        raisen richting de orchestrator.
++        """
++        try:
++            response = self.client.messages.create(
++                model=self.model,
++                max_tokens=400,
++                system=CLASSIFY_SYSTEM_PROMPT,
++                tools=[CLASSIFY_TOOL_SCHEMA],
++                tool_choice={"type": "tool", "name": "record_news_classification"},
++                messages=[{"role": "user", "content": f"Asset-feed: {asset}\nHeadline: {headline}"}],
++            )
++            data = next(b for b in response.content if b.type == "tool_use").input
++            return NewsClassification(
++                category=data["category"], entity=data["entity"], novelty=data["novelty"],
++                magnitude_guess=int(data["magnitude_guess"]), event_key=data["event_key"].strip()[:80],
++                rationale=data.get("rationale", "")[:300],
++            )
++        except Exception as e:
++            print(f"[nieuws] classificatie mislukt voor '{headline[:60]}': {e}")
++            return None
++
+     def analyze_headline(self, asset: str, headline: str,
+                           price_context: Optional[str] = None) -> LlmSentimentResult:
+         """
+diff --git a/migratie_news_events.sql b/migratie_news_events.sql
+new file mode 100644
+index 0000000..5b5c9b1
+--- /dev/null
++++ b/migratie_news_events.sql
+@@ -0,0 +1,48 @@
++-- Fase 1 nieuws/macro-plan (10 sep 2026): classificatie per gebeurtenis
++-- (geen richting) + plek voor de markt-labels uit de event-study.
++-- Draaien op een bestaande database (db_schema.sql loopt alleen bij een
++-- verse volume):  docker compose exec -T database psql -U hbar_bot -d hbar_bot < migratie_news_events.sql
++CREATE TABLE IF NOT EXISTS news_events (
++    id              BIGSERIAL PRIMARY KEY,
++    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
++    published_at    TIMESTAMPTZ,
++    asset           TEXT NOT NULL,              -- feed waaruit de kop kwam (BTC/HBAR)
++    headline        TEXT NOT NULL,
++    headline_key    TEXT NOT NULL,              -- genormaliseerd (rss_news_client.normalize_headline)
++    source_feed     TEXT,
++    url             TEXT,
++    -- LLM-classificatie (geen richting)
++    category        TEXT NOT NULL,              -- regulering_etf | listing_exchange | hack_security | macro_fed | adoption_partnership | tokenomics_unlock | protocol_upgrade | marktcommentaar | overig
++    entity          TEXT NOT NULL,              -- BTC | HBAR | markt_breed | andere_coin
++    novelty         TEXT NOT NULL,              -- nieuw_feit | update | commentaar
++    magnitude_guess SMALLINT NOT NULL,          -- 1..5
++    event_key       TEXT NOT NULL,              -- canonieke naam, clustert koppen over dezelfde gebeurtenis
++    llm_rationale   TEXT,
++    -- Markt-labels (event-study, later gevuld door cron)
++    pre_move_1h     DOUBLE PRECISION,
++    abn_ret_1h      DOUBLE PRECISION,
++    abn_ret_4h      DOUBLE PRECISION,
++    abn_ret_24h     DOUBLE PRECISION,
++    abn_vol_1h      DOUBLE PRECISION,
++    abn_vol_4h      DOUBLE PRECISION,
++    exc_ret_1h      DOUBLE PRECISION,           -- alleen HBAR: t.o.v. BTC
++    exc_ret_4h      DOUBLE PRECISION,
++    exc_ret_24h     DOUBLE PRECISION,
++    labeled_at      TIMESTAMPTZ
++);
++CREATE INDEX IF NOT EXISTS news_events_created_idx ON news_events (created_at);
++CREATE INDEX IF NOT EXISTS news_events_event_key_idx ON news_events (event_key);
++CREATE UNIQUE INDEX IF NOT EXISTS news_events_asset_headline_key_idx ON news_events (asset, headline_key);
++
++-- Geleerde gewichten (wekelijkse cron, fase 3); nu al aangemaakt zodat de
++-- code er vanaf het begin tegenaan kan lezen (leeg = gewicht 1 overal).
++CREATE TABLE IF NOT EXISTS news_weights (
++    asset       TEXT NOT NULL,
++    dimension   TEXT NOT NULL,                  -- category | novelty | source
++    value       TEXT NOT NULL,
++    weight      DOUBLE PRECISION NOT NULL,      -- |abnormale beweging| / basisniveau; 0 = ruis
++    direction   DOUBLE PRECISION,               -- +1/-1 als tekenconsistentie > 65% over n>=20, anders NULL
++    n           INTEGER NOT NULL,
++    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
++    PRIMARY KEY (asset, dimension, value)
++);
+diff --git a/postgres_client.py b/postgres_client.py
+index 819339e..3837ce1 100644
+--- a/postgres_client.py
++++ b/postgres_client.py
+@@ -56,6 +56,24 @@ class PostgresClient:
+             )
+             return row["id"]
+ 
++    async def log_news_event(self, asset: str, headline: str, headline_key: str, published_at,
++                             source_feed: str, url: str, category: str, entity: str, novelty: str,
++                             magnitude_guess: int, event_key: str, rationale: str) -> None:
++        """Fase 1 (10 sep 2026): classificatie per kop naar news_events; dubbele kop = stil overslaan."""
++        from datetime import datetime, timezone
++        pub = datetime.fromtimestamp(published_at, tz=timezone.utc) if published_at else None
++        async with self._pool.acquire() as conn:
++            await conn.execute(
++                """
++                INSERT INTO news_events (asset, headline, headline_key, published_at, source_feed, url,
++                                         category, entity, novelty, magnitude_guess, event_key, llm_rationale)
++                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
++                ON CONFLICT (asset, headline_key) DO NOTHING
++                """,
++                asset, headline, headline_key, pub, source_feed, url,
++                category, entity, novelty, magnitude_guess, event_key, rationale,
++            )
++
+     async def recent_headlines(self, hours: float = 24.0) -> list[str]:
+         """
+         NIEUW (10 sep 2026): headlines uit sentiment_log van de laatste
+diff --git a/regime_orchestrator.py b/regime_orchestrator.py
+index 7d4fea3..7e05c03 100644
+--- a/regime_orchestrator.py
++++ b/regime_orchestrator.py
+@@ -34,6 +34,11 @@ from typing import Optional
+ 
+ from rss_news_client import RssNewsClient
+ from rss_news_client import normalize_headline
++
++SENTIMENT_BIAS_BY_ASSET = {
++    "BTC": float(os.environ.get("SENTIMENT_BIAS_BTC", "0.17")),
++    "HBAR": float(os.environ.get("SENTIMENT_BIAS_HBAR", "0.27")),
++}
+ from messari_news_client import MessariNewsClient
+ from llm_sentiment_engine import LlmSentimentEngine
+ from geckoterminal_client import GeckoTerminalClient
+@@ -1905,6 +1910,25 @@ class RegimeOrchestrator:
+             results = [self.llm.analyze_headline(asset, i.title) for i in new_items]
+             timestamps = [i.published_at for i in new_items]
+ 
++            # FASE 1 nieuws/macro-plan (10 sep 2026): elke unieke kop óók
++            # classificeren (categorie/entiteit/nieuwheid/omvang/event_key,
++            # géén richting) en opslaan in news_events. De event-study-cron
++            # voegt daar later de markt-labels aan toe. Faalt stil.
++            for item in new_items:
++                cls = self.llm.classify_headline(asset, item.title)
++                if cls is None:
++                    continue
++                try:
++                    await self.db.log_news_event(
++                        asset=asset, headline=item.title, headline_key=normalize_headline(item.title),
++                        published_at=item.published_at, source_feed=item.source_feed, url=item.url,
++                        category=cls.category, entity=cls.entity, novelty=cls.novelty,
++                        magnitude_guess=cls.magnitude_guess, event_key=cls.event_key, rationale=cls.rationale,
++                    )
++                    print(f"[nieuws] {asset}: {cls.category}/{cls.novelty} m={cls.magnitude_guess} [{cls.event_key}] {item.title[:60]}")
++                except Exception as e:
++                    print(f"[nieuws] news_events schrijven mislukt: {e}")
++
+             # Gedifferentieerde halfwaardetijd per asset (28 aug 2026, op
+             # verzoek): BTC is een large-cap met snelle, liquide
+             # prijsvorming -- nieuws wordt binnen 1-2u grotendeels
+@@ -1914,6 +1938,13 @@ class RegimeOrchestrator:
+             half_life = SENTIMENT_HALF_LIFE_HOURS_BY_ASSET.get(asset, 1.5)
+ 
+             score = LlmSentimentEngine.aggregate_with_decay(results, timestamps, half_life_hours=half_life)
++            # BIAS-CORRECTIE (10 sep 2026, kalibratie): de LLM scoort
++            # structureel positief (30d-gemiddelde BTC +0,17, HBAR +0,27 in
++            # een dalende markt), waardoor "neutraal" in de bot feitelijk
++            # bullish was. Recentreren op het gemeten gemiddelde, zodat 0
++            # weer 0 is. Waarden herijken na de volgende kalibratierun;
++            # instelbaar via SENTIMENT_BIAS_BTC / SENTIMENT_BIAS_HBAR.
++            score -= SENTIMENT_BIAS_BY_ASSET.get(asset, 0.0)
+             volatility_sigma = LlmSentimentEngine.aggregate_volatility_with_decay(
+                 results, timestamps, half_life_hours=half_life
+             )
