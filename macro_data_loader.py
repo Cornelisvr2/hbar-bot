@@ -16,7 +16,8 @@ Bronnen (stand 10 sep 2026):
   fng          Fear & Greed (alternative.me)
   defillama    TVL Hedera-chain
   coingecko    BTC-dominantie, totale markt-cap, stablecoin-cap (keyloos, /global)
-  coinmarketcal geplande crypto-events BTC/HBAR -- COINMARKETCAL_API_KEY
+  coinmarketcal geplande crypto-events BTC/HBAR (v2, gratis plan: 7 dagen
+               vooruit, alleen titel+datum) -- COINMARKETCAL_API_KEY
 
 Draaien (in de bot-container, 1x per dag via cron; Binance-reeksen mogen
 vaker):
@@ -167,26 +168,47 @@ def laad_coingecko_global():
 
 
 def laad_coinmarketcal():
+    """
+    CoinMarketCal v2 (10 sep 2026): het oude host developers.coinmarketcal.com
+    bestaat niet meer. Gratis plan: komende 7 dagen, top-100 coins, alleen
+    titel+datum (geen categorie/impact), 24u vertraagd, 3k calls/mnd.
+    Eén call per dag volstaat; we filteren client-side op BTC/HBAR.
+    """
     key = os.environ.get("COINMARKETCAL_API_KEY")
     if not key:
         raise EnvironmentError("COINMARKETCAL_API_KEY ontbreekt")
-    nu = datetime.now(timezone.utc)
+    r = requests.get("https://api.coinmarketcal.com/v2/events",
+                     params={"sortBy": "date_asc", "limit": 100},
+                     headers={"x-api-key": key, "Accept": "application/json", **UA}, timeout=20)
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code}: {_maskeer(r.text[:200])}")
     events = []
-    for coin, asset in (("bitcoin", "BTC"), ("hedera-hashgraph", "HBAR")):
-        data = requests.get("https://developers.coinmarketcal.com/v1/events",
-                            params={"coins": coin, "dateRangeStart": nu.date().isoformat(),
-                                    "dateRangeEnd": (nu + timedelta(days=30)).date().isoformat(), "max": 50},
-                            headers={"x-api-key": key, "Accept": "application/json", **UA}, timeout=20)
-        data.raise_for_status()
-        for e in data.json().get("body", []):
-            try:
-                ts = datetime.fromisoformat(str(e["date_event"]).replace("Z", "+00:00"))
-            except Exception:
+    for e in r.json().get("data", []):
+        symbolen = {(c.get("symbol") or "").upper() for c in e.get("coins", [])}
+        asset = "BTC" if "BTC" in symbolen else "HBAR" if "HBAR" in symbolen else None
+        if asset is None:
+            continue
+        ts = None
+        for veld in ("date", "dateEvent", "displayedDate"):
+            raw = e.get(veld)
+            if not raw:
                 continue
-            titel = e.get("title", {}).get("en") if isinstance(e.get("title"), dict) else e.get("title")
-            events.append(("coinmarketcal", (titel or "")[:120], ts, None,
-                           "high" if e.get("is_hot") else "medium", asset, None, None, None))
-        time.sleep(0.3)
+            for fmt in (None, "%d %b %Y"):
+                try:
+                    ts = (datetime.fromisoformat(str(raw).replace("Z", "+00:00")) if fmt is None
+                          else datetime.strptime(str(raw), fmt))
+                    break
+                except Exception:
+                    continue
+            if ts:
+                break
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        impact = e.get("impact")
+        niveau = ("high" if impact and float(impact) >= 7.5 else "medium") if impact is not None else "medium"
+        events.append(("coinmarketcal", (e.get("title") or "")[:120], ts, None, niveau, asset, None, None, None))
     return [], events
 
 
