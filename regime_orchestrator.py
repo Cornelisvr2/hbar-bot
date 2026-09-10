@@ -34,6 +34,11 @@ from typing import Optional
 
 from rss_news_client import RssNewsClient
 from rss_news_client import normalize_headline
+
+SENTIMENT_BIAS_BY_ASSET = {
+    "BTC": float(os.environ.get("SENTIMENT_BIAS_BTC", "0.17")),
+    "HBAR": float(os.environ.get("SENTIMENT_BIAS_HBAR", "0.27")),
+}
 from messari_news_client import MessariNewsClient
 from llm_sentiment_engine import LlmSentimentEngine
 from geckoterminal_client import GeckoTerminalClient
@@ -1905,6 +1910,25 @@ class RegimeOrchestrator:
             results = [self.llm.analyze_headline(asset, i.title) for i in new_items]
             timestamps = [i.published_at for i in new_items]
 
+            # FASE 1 nieuws/macro-plan (10 sep 2026): elke unieke kop óók
+            # classificeren (categorie/entiteit/nieuwheid/omvang/event_key,
+            # géén richting) en opslaan in news_events. De event-study-cron
+            # voegt daar later de markt-labels aan toe. Faalt stil.
+            for item in new_items:
+                cls = self.llm.classify_headline(asset, item.title)
+                if cls is None:
+                    continue
+                try:
+                    await self.db.log_news_event(
+                        asset=asset, headline=item.title, headline_key=normalize_headline(item.title),
+                        published_at=item.published_at, source_feed=item.source_feed, url=item.url,
+                        category=cls.category, entity=cls.entity, novelty=cls.novelty,
+                        magnitude_guess=cls.magnitude_guess, event_key=cls.event_key, rationale=cls.rationale,
+                    )
+                    print(f"[nieuws] {asset}: {cls.category}/{cls.novelty} m={cls.magnitude_guess} [{cls.event_key}] {item.title[:60]}")
+                except Exception as e:
+                    print(f"[nieuws] news_events schrijven mislukt: {e}")
+
             # Gedifferentieerde halfwaardetijd per asset (28 aug 2026, op
             # verzoek): BTC is een large-cap met snelle, liquide
             # prijsvorming -- nieuws wordt binnen 1-2u grotendeels
@@ -1914,6 +1938,13 @@ class RegimeOrchestrator:
             half_life = SENTIMENT_HALF_LIFE_HOURS_BY_ASSET.get(asset, 1.5)
 
             score = LlmSentimentEngine.aggregate_with_decay(results, timestamps, half_life_hours=half_life)
+            # BIAS-CORRECTIE (10 sep 2026, kalibratie): de LLM scoort
+            # structureel positief (30d-gemiddelde BTC +0,17, HBAR +0,27 in
+            # een dalende markt), waardoor "neutraal" in de bot feitelijk
+            # bullish was. Recentreren op het gemeten gemiddelde, zodat 0
+            # weer 0 is. Waarden herijken na de volgende kalibratierun;
+            # instelbaar via SENTIMENT_BIAS_BTC / SENTIMENT_BIAS_HBAR.
+            score -= SENTIMENT_BIAS_BY_ASSET.get(asset, 0.0)
             volatility_sigma = LlmSentimentEngine.aggregate_volatility_with_decay(
                 results, timestamps, half_life_hours=half_life
             )

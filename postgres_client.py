@@ -56,6 +56,24 @@ class PostgresClient:
             )
             return row["id"]
 
+    async def log_news_event(self, asset: str, headline: str, headline_key: str, published_at,
+                             source_feed: str, url: str, category: str, entity: str, novelty: str,
+                             magnitude_guess: int, event_key: str, rationale: str) -> None:
+        """Fase 1 (10 sep 2026): classificatie per kop naar news_events; dubbele kop = stil overslaan."""
+        from datetime import datetime, timezone
+        pub = datetime.fromtimestamp(published_at, tz=timezone.utc) if published_at else None
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO news_events (asset, headline, headline_key, published_at, source_feed, url,
+                                         category, entity, novelty, magnitude_guess, event_key, llm_rationale)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                ON CONFLICT (asset, headline_key) DO NOTHING
+                """,
+                asset, headline, headline_key, pub, source_feed, url,
+                category, entity, novelty, magnitude_guess, event_key, rationale,
+            )
+
     async def recent_headlines(self, hours: float = 24.0) -> list[str]:
         """
         NIEUW (10 sep 2026): headlines uit sentiment_log van de laatste

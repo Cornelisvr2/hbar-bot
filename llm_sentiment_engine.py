@@ -182,10 +182,77 @@ class LlmSentimentResult:
     headline: str
 
 
+CLASSIFY_SYSTEM_PROMPT = """Je bent een nieuwsclassificeerder voor een crypto-handelsbot (assets: BTC en HBAR/Hedera).
+Je beoordeelt GEEN richting (bullish/bearish) -- dat leert de bot zelf uit de koersreactie.
+Je bepaalt alleen WAT voor nieuws dit is, OVER WIE het gaat, of het NIEUW is en hoe GROOT het kan zijn.
+Wees streng op nieuwheid: een kop die een bekend feit becommentarieert, samenvat of voorspelt is 'commentaar'.
+Koersanalyses, 'price prediction', 'is dit de bodem?', meningen van analisten = category 'marktcommentaar', novelty 'commentaar', magnitude 1.
+event_key: korte canonieke naam van de onderliggende gebeurtenis in het Engels, zonder datum, zodat meerdere koppen over dezelfde gebeurtenis dezelfde key krijgen (bv. 'SEC decision HBAR ETF', 'Liquid sidechain pause', 'US CPI release')."""
+
+CLASSIFY_TOOL_SCHEMA = {
+    "name": "record_news_classification",
+    "description": "Registreert de classificatie van een crypto-nieuwskop (zonder richting).",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "category": {"type": "string", "enum": [
+                "regulering_etf", "listing_exchange", "hack_security", "macro_fed",
+                "adoption_partnership", "tokenomics_unlock", "protocol_upgrade",
+                "marktcommentaar", "overig"]},
+            "entity": {"type": "string", "enum": ["BTC", "HBAR", "markt_breed", "andere_coin"]},
+            "novelty": {"type": "string", "enum": ["nieuw_feit", "update", "commentaar"]},
+            "magnitude_guess": {"type": "integer", "minimum": 1, "maximum": 5,
+                                 "description": "1 = irrelevant, 3 = kan de koers van deze asset merkbaar bewegen, 5 = marktschok (hack, verbod, ETF-besluit, Fed-verrassing)"},
+            "event_key": {"type": "string", "description": "Canonieke gebeurtenisnaam, Engels, max 6 woorden, geen datum."},
+            "rationale": {"type": "string", "description": "Eén zin."},
+        },
+        "required": ["category", "entity", "novelty", "magnitude_guess", "event_key", "rationale"],
+    },
+}
+
+
+@dataclass
+class NewsClassification:
+    category: str
+    entity: str
+    novelty: str
+    magnitude_guess: int
+    event_key: str
+    rationale: str
+
+
 class LlmSentimentEngine:
     def __init__(self, api_key: Optional[str] = None, model: str = LLM_MODEL):
         self.client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
         self.model = model
+
+    def classify_headline(self, asset: str, headline: str) -> Optional[NewsClassification]:
+        """
+        FASE 1 nieuws/macro-plan (10 sep 2026): classificatie ZONDER richting.
+        Draait naast analyze_headline() (de richtingsscore blijft voorlopig
+        bestaan voor de flash-verdediging en de combined score); de
+        classificatie gaat naar news_events, waar de event-study-cron de
+        markt-labels aan toevoegt. Retourneert None bij een fout -- nooit
+        raisen richting de orchestrator.
+        """
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=400,
+                system=CLASSIFY_SYSTEM_PROMPT,
+                tools=[CLASSIFY_TOOL_SCHEMA],
+                tool_choice={"type": "tool", "name": "record_news_classification"},
+                messages=[{"role": "user", "content": f"Asset-feed: {asset}\nHeadline: {headline}"}],
+            )
+            data = next(b for b in response.content if b.type == "tool_use").input
+            return NewsClassification(
+                category=data["category"], entity=data["entity"], novelty=data["novelty"],
+                magnitude_guess=int(data["magnitude_guess"]), event_key=data["event_key"].strip()[:80],
+                rationale=data.get("rationale", "")[:300],
+            )
+        except Exception as e:
+            print(f"[nieuws] classificatie mislukt voor '{headline[:60]}': {e}")
+            return None
 
     def analyze_headline(self, asset: str, headline: str,
                           price_context: Optional[str] = None) -> LlmSentimentResult:
