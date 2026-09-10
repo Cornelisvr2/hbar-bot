@@ -196,6 +196,12 @@ class BearishTrailingStopTracker:
 class RegimeOrchestrator:
     def __init__(self, db):
         self.db = db
+        try:
+            from event_guard import EventGuard
+            self.event_guard = EventGuard(db) if db is not None else None
+        except Exception as e:
+            print(f"[event-guard] niet geladen: {e}")
+            self.event_guard = None
         self.rss_news = RssNewsClient()
         self.messari_news = MessariNewsClient()
         self.llm = LlmSentimentEngine()
@@ -2540,6 +2546,16 @@ class RegimeOrchestrator:
                           "kapitaal onaangeroerd, wordt periodiek opnieuw geprobeerd.")
 
         target_regime = self._determine_target_regime(combined_score)
+
+        # LAAG 7 event-risico-kalender (10 sep 2026): binnen ±2u van een
+        # geplande macro-gebeurtenis (CPI, FOMC, NFP, ETF-besluit) geen
+        # NIEUWE reflex-instap -- dat is een gok op het cijfer, niet op het
+        # regime. Lopende reflex-posities en trailing-stops blijven
+        # ongemoeid; alleen de overgang LP_MODE -> reflex wordt tegengehouden.
+        if (self.current_regime == Regime.LP_MODE and target_regime != Regime.LP_MODE
+                and self.event_guard is not None):
+            if await self.event_guard.blocks_new_reflex_entry(combined_score):
+                target_regime = Regime.LP_MODE
         is_profit_take = False
         is_market_confirmed_reentry = False
         market_confirmed_reason = ""

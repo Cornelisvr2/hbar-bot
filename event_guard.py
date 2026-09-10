@@ -1,0 +1,118 @@
+"""
+event_guard.py -- laag 7 "event-risico-kalender" (fase 2, 10 sep 2026).
+
+Rond geplande macro-/crypto-gebeurtenissen (CPI, FOMC, NFP, ETF-besluiten,
+grote unlocks) is de koersreactie een muntworp met dikke staarten. De bot
+mag dan geen NIEUWE reflex-positie innemen: een reflex-instap vlak vóór
+een CPI-cijfer is een gok op het cijfer, niet op het regime. Lopende
+posities blijven ongemoeid (trailing-stops werken gewoon door).
+
+Werking: leest event_calendar (impact high, of medium als
+EVENT_GUARD_INCLUDE_MEDIUM=1) en meldt of `nu` binnen het venster
+[ts - EVENT_GUARD_BEFORE_MIN, ts + EVENT_GUARD_AFTER_MIN] van zo'n
+gebeurtenis valt. Standaard 120 min vóór en 120 min ná.
+
+Modus (EVENT_GUARD_MODE):
+  active  -> reflex-instap wordt geblokkeerd en gelogd (standaard: dit is
+             een rem, geen actie -- het laagste-risico-gebruik van nieuws)
+  shadow  -> alleen loggen wat geblokkeerd ZOU zijn
+  off     -> uit
+Cache 5 min zodat de DB niet elke cyclus bevraagd wordt; bij een DB-fout
+valt de guard open (geen blokkade) en logt dat.
+"""
+import os
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+EVENT_GUARD_MODE = os.environ.get("EVENT_GUARD_MODE", "active").lower()
+BEFORE_MIN = int(os.environ.get("EVENT_GUARD_BEFORE_MIN", "120"))
+AFTER_MIN = int(os.environ.get("EVENT_GUARD_AFTER_MIN", "120"))
+INCLUDE_MEDIUM = os.environ.get("EVENT_GUARD_INCLUDE_MEDIUM", "0") == "1"
+CACHE_SECONDS = 300
+
+# Kalender-titels die altijd als 'high' tellen, ook als de bron ze medium noemt.
+ALWAYS_HIGH = ("cpi", "fomc", "federal funds rate", "fed chair", "non-farm", "nonfarm", "nfp",
+               "pce price", "etf", "gdp q", "unemployment rate")
+
+
+@dataclass
+class EventWindow:
+    name: str
+    ts: datetime
+    impact: str
+    asset: Optional[str]
+    source: str
+
+    def describe(self, nu: datetime) -> str:
+        delta = (self.ts - nu).total_seconds() / 60
+        wanneer = f"over {delta:.0f} min" if delta >= 0 else f"{-delta:.0f} min geleden"
+        return f"{self.name} ({self.impact}, {self.source}) {wanneer}"
+
+
+class EventGuard:
+    def __init__(self, db):
+        self.db = db
+        self._cache: list[EventWindow] = []
+        self._cache_at = 0.0
+        self._last_logged_key = None
+
+    async def _refresh(self):
+        if time.time() - self._cache_at < CACHE_SECONDS:
+            return
+        nu = datetime.now(timezone.utc)
+        async with self.db._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT source, name, ts, impact, asset FROM event_calendar "
+                "WHERE ts BETWEEN $1 AND $2 ORDER BY ts",
+                nu - timedelta(minutes=AFTER_MIN + 5), nu + timedelta(minutes=BEFORE_MIN + 5))
+        out = []
+        for r in rows:
+            impact = (r["impact"] or "").lower()
+            naam_l = (r["name"] or "").lower()
+            if any(k in naam_l for k in ALWAYS_HIGH):
+                impact = "high"
+            if impact == "high" or (INCLUDE_MEDIUM and impact == "medium"):
+                ts = r["ts"] if r["ts"].tzinfo else r["ts"].replace(tzinfo=timezone.utc)
+                out.append(EventWindow(r["name"], ts, impact, r["asset"], r["source"]))
+        self._cache, self._cache_at = out, time.time()
+
+    async def active_window(self) -> Optional[EventWindow]:
+        """De gebeurtenis waarvan we nu in het venster zitten, of None."""
+        if EVENT_GUARD_MODE == "off":
+            return None
+        try:
+            await self._refresh()
+        except Exception as e:
+            print(f"[event-guard] kalender niet leesbaar ({e}) -- guard staat open.")
+            return None
+        nu = datetime.now(timezone.utc)
+        for ev in self._cache:
+            if ev.ts - timedelta(minutes=BEFORE_MIN) <= nu <= ev.ts + timedelta(minutes=AFTER_MIN):
+                return ev
+        return None
+
+    async def blocks_new_reflex_entry(self, combined_score: float) -> bool:
+        """
+        True als een NIEUWE reflex-instap nu geblokkeerd moet worden
+        (alleen in modus 'active'). Logt in beide modi naar decisions.jsonl,
+        hoogstens één keer per gebeurtenis per venster.
+        """
+        ev = await self.active_window()
+        if ev is None:
+            return False
+        nu = datetime.now(timezone.utc)
+        sleutel = (ev.name, ev.ts.isoformat())
+        if sleutel != self._last_logged_key:
+            self._last_logged_key = sleutel
+            try:
+                import decision_log
+                decision_log.log("event_guard", mode=EVENT_GUARD_MODE, event=ev.name, event_ts=ev.ts.isoformat(),
+                                 impact=ev.impact, source=ev.source, combined_score=combined_score,
+                                 blocked=(EVENT_GUARD_MODE == "active"))
+            except Exception:
+                pass
+            print(f"[event-guard] {'BLOKKEERT' if EVENT_GUARD_MODE == 'active' else 'schaduw: zou blokkeren'} "
+                  f"nieuwe reflex-instap: {ev.describe(nu)} (score={combined_score:+.2f})")
+        return EVENT_GUARD_MODE == "active"
