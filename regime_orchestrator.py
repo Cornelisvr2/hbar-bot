@@ -1886,7 +1886,7 @@ class RegimeOrchestrator:
             try:
                 bekend = {normalize_headline(h) for h in await self.db.recent_headlines(24.0)}
             except Exception as e:
-                logger.warning(f"Ontdubbeling via sentiment_log mislukt ({e}) -- alleen in-memory set gebruikt.")
+                print(f"[nieuws] Ontdubbeling via sentiment_log mislukt ({e}) -- alleen in-memory set gebruikt.")
                 bekend = set()
             uniek, gezien = [], set()
             for i in new_items:
@@ -1897,7 +1897,7 @@ class RegimeOrchestrator:
                 gezien.add(sleutel)
                 uniek.append(i)
             if len(uniek) < len(new_items):
-                logger.info(f"{asset}: {len(new_items) - len(uniek)} dubbele headline(s) overgeslagen.")
+                print(f"[nieuws] {asset}: {len(new_items) - len(uniek)} dubbele headline(s) overgeslagen.")
             new_items = uniek
             if not new_items:
                 continue

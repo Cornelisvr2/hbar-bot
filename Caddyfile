@@ -7,3 +7,11 @@
     }
     reverse_proxy dashboard:8000
 }
+
+ibkr.187-124-8-211.sslip.io {
+    basic_auth {
+        cornelis $2a$14$F1Rgax6OqRZ7.prY6bb8E.28NOnAsk9sou6TDe1NKoBvqWYRidNES
+    }
+    encode gzip
+    reverse_proxy host.docker.internal:8899
+}
