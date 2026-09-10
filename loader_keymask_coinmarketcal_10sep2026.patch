@@ -1,0 +1,126 @@
+diff --git a/macro_data_loader.py b/macro_data_loader.py
+index 4c79045..2b29b0d 100644
+--- a/macro_data_loader.py
++++ b/macro_data_loader.py
+@@ -16,7 +16,8 @@ Bronnen (stand 10 sep 2026):
+   fng          Fear & Greed (alternative.me)
+   defillama    TVL Hedera-chain
+   coingecko    BTC-dominantie, totale markt-cap, stablecoin-cap (keyloos, /global)
+-  coinmarketcal geplande crypto-events BTC/HBAR -- COINMARKETCAL_API_KEY
++  coinmarketcal geplande crypto-events BTC/HBAR (v2, gratis plan: 7 dagen
++               vooruit, alleen titel+datum) -- COINMARKETCAL_API_KEY
+ 
+ Draaien (in de bot-container, 1x per dag via cron; Binance-reeksen mogen
+ vaker):
+@@ -38,10 +39,22 @@ FRED_SERIES = ["DTWEXBGS", "DGS10", "DGS2", "DFII10", "DFF", "VIXCLS", "SP500"]
+ FUT_SYMBOLS = ["BTCUSDT", "HBARUSDT"]
+ 
+ 
++import re as _re
++_KEY_RE = _re.compile(r"(apikey|api_key|x-api-key|token)=[^&\s]+", _re.I)
++
++
++def _maskeer(tekst: str) -> str:
++    """Keys nooit in logs/foutmeldingen (10 sep 2026: FMP-key lekte via een 403-URL)."""
++    return _KEY_RE.sub(r"\1=***", str(tekst))
++
++
+ def _get(url, params=None, timeout=20):
+-    r = requests.get(url, params=params, headers=UA, timeout=timeout)
+-    r.raise_for_status()
+-    return r.json()
++    try:
++        r = requests.get(url, params=params, headers=UA, timeout=timeout)
++        r.raise_for_status()
++        return r.json()
++    except Exception as e:
++        raise RuntimeError(_maskeer(e)) from None
+ 
+ 
+ def _num(v):
+@@ -79,8 +92,11 @@ def laad_fmp(dagen_vooruit=14, dagen_terug=7):
+               "to": (nu + timedelta(days=dagen_vooruit)).date().isoformat(), "apikey": key}
+     try:
+         data = _get("https://financialmodelingprep.com/stable/economic-calendar", params)
+-    except Exception:
+-        data = _get("https://financialmodelingprep.com/api/v3/economic_calendar", params)
++    except Exception as e1:
++        try:
++            data = _get("https://financialmodelingprep.com/api/v3/economic_calendar", params)
++        except Exception as e2:
++            raise RuntimeError(f"stable: {e1} | v3: {e2}")
+     events = []
+     for e in data:
+         if (e.get("country") or "").upper() not in ("US", "USA", "UNITED STATES"):
+@@ -152,26 +168,47 @@ def laad_coingecko_global():
+ 
+ 
+ def laad_coinmarketcal():
++    """
++    CoinMarketCal v2 (10 sep 2026): het oude host developers.coinmarketcal.com
++    bestaat niet meer. Gratis plan: komende 7 dagen, top-100 coins, alleen
++    titel+datum (geen categorie/impact), 24u vertraagd, 3k calls/mnd.
++    Eén call per dag volstaat; we filteren client-side op BTC/HBAR.
++    """
+     key = os.environ.get("COINMARKETCAL_API_KEY")
+     if not key:
+         raise EnvironmentError("COINMARKETCAL_API_KEY ontbreekt")
+-    nu = datetime.now(timezone.utc)
++    r = requests.get("https://api.coinmarketcal.com/v2/events",
++                     params={"sortBy": "date_asc", "limit": 100},
++                     headers={"x-api-key": key, "Accept": "application/json", **UA}, timeout=20)
++    if r.status_code >= 400:
++        raise RuntimeError(f"HTTP {r.status_code}: {_maskeer(r.text[:200])}")
+     events = []
+-    for coin, asset in (("bitcoin", "BTC"), ("hedera-hashgraph", "HBAR")):
+-        data = requests.get("https://developers.coinmarketcal.com/v1/events",
+-                            params={"coins": coin, "dateRangeStart": nu.date().isoformat(),
+-                                    "dateRangeEnd": (nu + timedelta(days=30)).date().isoformat(), "max": 50},
+-                            headers={"x-api-key": key, "Accept": "application/json", **UA}, timeout=20)
+-        data.raise_for_status()
+-        for e in data.json().get("body", []):
+-            try:
+-                ts = datetime.fromisoformat(str(e["date_event"]).replace("Z", "+00:00"))
+-            except Exception:
++    for e in r.json().get("data", []):
++        symbolen = {(c.get("symbol") or "").upper() for c in e.get("coins", [])}
++        asset = "BTC" if "BTC" in symbolen else "HBAR" if "HBAR" in symbolen else None
++        if asset is None:
++            continue
++        ts = None
++        for veld in ("date", "dateEvent", "displayedDate"):
++            raw = e.get(veld)
++            if not raw:
+                 continue
+-            titel = e.get("title", {}).get("en") if isinstance(e.get("title"), dict) else e.get("title")
+-            events.append(("coinmarketcal", (titel or "")[:120], ts, None,
+-                           "high" if e.get("is_hot") else "medium", asset, None, None, None))
+-        time.sleep(0.3)
++            for fmt in (None, "%d %b %Y"):
++                try:
++                    ts = (datetime.fromisoformat(str(raw).replace("Z", "+00:00")) if fmt is None
++                          else datetime.strptime(str(raw), fmt))
++                    break
++                except Exception:
++                    continue
++            if ts:
++                break
++        if ts is None:
++            continue
++        if ts.tzinfo is None:
++            ts = ts.replace(tzinfo=timezone.utc)
++        impact = e.get("impact")
++        niveau = ("high" if impact and float(impact) >= 7.5 else "medium") if impact is not None else "medium"
++        events.append(("coinmarketcal", (e.get("title") or "")[:120], ts, None, niveau, asset, None, None, None))
+     return [], events
+ 
+ 
+@@ -214,7 +251,7 @@ def main():
+             alle_events += events
+             verslag.append(f"{naam}: {len(rijen)} waarden, {len(events)} events")
+         except Exception as e:
+-            verslag.append(f"{naam}: MISLUKT -- {e}")
++            verslag.append(f"{naam}: MISLUKT -- {_maskeer(e)}")
+     if "--dry" not in sys.argv:
+         asyncio.run(schrijf(alle_rijen, alle_events))
+     print(f"[macro-data] {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC")
