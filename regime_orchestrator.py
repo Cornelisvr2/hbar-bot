@@ -825,10 +825,43 @@ class RegimeOrchestrator:
             telegram_notify.send_telegram_message(
                 f"{reden_label}: herbalancering voltooid, nieuwe positie {self.lp_manager.state.token_id}."
             )
+            try:
+                import decision_log
+                decision_log.log("rebalance_done", reason=reden_label, new_token_id=self.lp_manager.state.token_id,
+                                 tick_lower=nieuwe_tick_lower, tick_upper=nieuwe_tick_upper, price=current_price,
+                                 hbar_in=hbar_balance, usdc_in=usdc_balance)
+            except Exception:
+                pass
             return True
         except Exception as e:
             telegram_notify.report_error(f"{reden_label}: nieuwe positie openen", str(e))
             return False
+
+    REBALANCE_PAYBACK_DAYS = float(os.environ.get("REBALANCE_PAYBACK_DAYS", "3.0"))
+
+    def _estimate_position_value_hbar(self, current_price: float) -> float:
+        """(10 sep 2026) Positiewaarde in HBAR-equivalent, on-chain; 0 bij storing."""
+        try:
+            from lp_manager import compute_position_amounts, get_live_pool_price
+            st = self.lp_manager.state
+            if not st.is_open or st.token_id is None:
+                return 0.0
+            cfg = self.lp_manager.config
+            liquidity = int(self.lp_manager.position_manager.functions.positions(st.token_id).call()[5])
+            live = get_live_pool_price(self.rpc_client, cfg.factory_address, cfg.token0, cfg.token1,
+                                       cfg.fee_tier, cfg.token0_decimals, cfg.token1_decimals)
+            hbar_is_token0 = cfg.token0.lower() == cfg.whbar_address.lower()
+            # get_live_pool_price geeft quote-per-HBAR; compute_position_amounts
+            # verwacht de CANONIEKE prijs (token1 per token0) -- zelfde
+            # omrekening als bot_data.py.
+            live_canoniek = live if hbar_is_token0 else (1.0 / live if live > 0 else 0.0)
+            a0, a1 = compute_position_amounts(liquidity, st.tick_lower, st.tick_upper, live_canoniek,
+                                              cfg.token0_decimals, cfg.token1_decimals)
+            hbar_amt, quote_amt = (a0, a1) if hbar_is_token0 else (a1, a0)
+            quote_in_hbar = quote_amt / current_price if (HEDERA_NETWORK == "mainnet" and current_price > 0) else 0.0
+            return float(hbar_amt + quote_in_hbar)
+        except Exception:
+            return 0.0
 
     async def _fee_underperformance_check(self, current_price: float):
         """
@@ -897,6 +930,11 @@ class RegimeOrchestrator:
         if prijs_upper <= prijs_lower:
             return  # defensief, voorkomt een deling-door-nul verderop
         in_range_pct = (fresh_price - prijs_lower) / (prijs_upper - prijs_lower) * 100
+        # (10 sep 2026) Canoniek -> mensvriendelijk: op mainnet (USDC=token0)
+        # is de canonieke schaal omgekeerd; 0% = onderrand in USD/HBAR.
+        hbar_is_token0 = self.lp_manager.config.token0.lower() == self.lp_manager.config.whbar_address.lower()
+        if not hbar_is_token0:
+            in_range_pct = 100.0 - in_range_pct
 
         if 15 <= in_range_pct <= 85:
             self._fee_stagnant_since = None  # niet dicht bij de rand -- niet van toepassing
@@ -915,7 +953,20 @@ class RegimeOrchestrator:
             fee0_raw, fee1_raw = position_manager.functions.collect(
                 (self.lp_manager.state.token_id, self.rpc_client.address, UINT128_MAX, UINT128_MAX)
             ).call({"from": self.rpc_client.address})
-            fee_hbar_nu = fee0_raw / (10 ** self._hbar_decimals)
+            # BUGFIX (10 sep 2026): fee0 werd als HBAR gelezen -- op mainnet is
+            # token0 USDC, dus de HBAR-fees werden GENEGEERD en de USDC-fees
+            # met 8 i.p.v. 6 decimalen gedeeld: "geen meetbare fee-groei"
+            # terwijl de positie gewoon verdiende -> twee onnodige
+            # herbalanceringen op 8-9 sep. Nu: beide kanten, in HBAR-
+            # equivalent (USDC omgerekend via de USD-prijs).
+            if hbar_is_token0:
+                fee_hbar_raw, fee_quote_raw = fee0_raw, fee1_raw
+            else:
+                fee_hbar_raw, fee_quote_raw = fee1_raw, fee0_raw
+            fee_hbar = fee_hbar_raw / (10 ** self._hbar_decimals)
+            fee_quote = fee_quote_raw / (10 ** self._usdc_decimals)
+            quote_in_hbar = (fee_quote / current_price) if (HEDERA_NETWORK == "mainnet" and current_price > 0) else 0.0
+            fee_hbar_nu = fee_hbar + quote_in_hbar
         except Exception as e:
             telegram_notify.report_error(
                 "fee_underperformance_check: fees opvragen",
@@ -923,7 +974,13 @@ class RegimeOrchestrator:
             )
             return
 
-        FEE_GROEI_DREMPEL_HBAR = 0.001  # AANNAME, ruwweg de gasfee-orde-grootte
+        # (10 sep 2026) Relatieve drempel i.p.v. 0,001 HBAR absoluut: "geen
+        # groei" = minder dan 10% van wat de positie bij de pool-APR sinds
+        # de vorige meting had moeten verdienen.
+        positie_hbar_equiv = self._estimate_position_value_hbar(current_price)
+        uren_sinds_meting = ((time.time() - self._fee_stagnant_since) / 3600) if self._fee_stagnant_since else 1.0
+        verwacht_per_uur = positie_hbar_equiv * (self._cached_pool_fees_apr or 0.0) / 8760
+        FEE_GROEI_DREMPEL_HBAR = max(0.001, 0.10 * verwacht_per_uur * max(1.0, uren_sinds_meting))
         if fee_hbar_nu > self._last_significant_fee_hbar + FEE_GROEI_DREMPEL_HBAR:
             self._last_significant_fee_hbar = fee_hbar_nu
             self._fee_stagnant_since = None  # fees groeien wel degelijk -- geen actie nodig
@@ -937,9 +994,30 @@ class RegimeOrchestrator:
         if uren_stagnant < self.fee_stagnation_uren_drempel:
             return
 
+        # (10 sep 2026) Kosten-batenafweging: hercentreren kost ~ROUND_GAS_
+        # BUFFER_HBAR + swap-fees. Alleen doen als de verwachte extra fee-
+        # opbrengst dat binnen REBALANCE_PAYBACK_DAYS terugverdient.
+        import decision_log
+        verwacht_per_dag = positie_hbar_equiv * (self._cached_pool_fees_apr or 0.0) / 365
+        kosten_hbar = self.ROUND_GAS_BUFFER_HBAR + 0.003 * positie_hbar_equiv  # gas + ~0,3% swap/slippage
+        if verwacht_per_dag * self.REBALANCE_PAYBACK_DAYS < kosten_hbar:
+            if time.time() - getattr(self, "_fee_underperf_econ_skip_at", 0.0) > 6 * 3600:
+                self._fee_underperf_econ_skip_at = time.time()
+                print(f"[fee-onderprestatie] {uren_stagnant:.1f}u stagnatie op {in_range_pct:.1f}% van de range, maar "
+                      f"hercentreren (~{kosten_hbar:.1f} HBAR) verdient zich niet terug binnen "
+                      f"{self.REBALANCE_PAYBACK_DAYS:.0f} dagen (verwacht {verwacht_per_dag:.2f} HBAR/dag) -- overgeslagen.")
+                decision_log.log("rebalance_skipped", reason="fee_underperformance_uneconomic",
+                                 in_range_pct=in_range_pct, hours_stagnant=uren_stagnant,
+                                 cost_hbar=kosten_hbar, expected_hbar_per_day=verwacht_per_dag,
+                                 position_hbar=positie_hbar_equiv, price=current_price)
+            return
+
         print(f"[fee-onderprestatie] Positie staat {in_range_pct:.1f}% in de range (dicht bij de rand) "
               f"en heeft {uren_stagnant:.1f} uur geen meetbare fee-groei laten zien -- "
               f"positie wordt proactief hercentreerd.")
+        decision_log.log("rebalance", reason="fee_underperformance", in_range_pct=in_range_pct,
+                         hours_stagnant=uren_stagnant, fees_hbar_equiv=fee_hbar_nu, cost_hbar=kosten_hbar,
+                         expected_hbar_per_day=verwacht_per_dag, price=current_price)
 
         from safety_override import compute_fixed_combined_score, compute_combined_volatility_sigma
         from gbm_range_model import apply_regime_bias
@@ -2686,6 +2764,7 @@ class RegimeOrchestrator:
     # fees. Instelbaar via .env; zelfde default als het vangnet-pad
     # (LP_SAFETYNET_MIN_RESERVE_HBAR).
     MIN_GAS_RESERVE_HBAR = float(os.environ.get("MIN_GAS_RESERVE_HBAR", "50.0"))
+    ROUND_GAS_BUFFER_HBAR = float(os.environ.get("ROUND_GAS_BUFFER_HBAR", "8.0"))
 
     def _get_swappable_hbar_balance(self, current_price: float) -> float:
         """
@@ -2725,6 +2804,10 @@ class RegimeOrchestrator:
                 return 0.0
         usd_based_reserve = self.GAS_RESERVE_USD / current_price if current_price > 0 else 0.0
         gas_reserve_hbar = max(usd_based_reserve, self.MIN_GAS_RESERVE_HBAR)
+        # (10 sep 2026) Plus een buffer voor de gas van de ronde ZELF
+        # (sluiten+swap+wrap+approves+mint ~3-4 HBAR): anders eindigt de
+        # wallet na elke herbalancering ONDER de reserve (97,9 -> 46,9).
+        gas_reserve_hbar += self.ROUND_GAS_BUFFER_HBAR
         return max(0.0, balance - gas_reserve_hbar)
 
     def _get_swappable_usdc_balance(self) -> float:
