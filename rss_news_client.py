@@ -19,6 +19,41 @@ import hashlib
 import re
 
 
+# RUISFILTER (10 sep 2026, op verzoek): de Google-News-feed voor HBAR trekt
+# clickbait en promo mee -- "Price Prediction: ... $0.11?", YouTube-titels,
+# presale-advertenties ("$60K+ Raised ... Ignites Demand") -- en de LLM
+# scoort promotionele tekst positief. Zulke koppen zeggen niets over de
+# markt; ze worden hier weggefilterd VOORDAT ze de LLM bereiken. Patronen
+# op kleine letters van titel en link. Bewust conservatief: liever een
+# enkele promo doorlaten dan echt nieuws blokkeren.
+NOISE_TITLE_PATTERNS = (
+    r"\bprice prediction\b", r"\bprice forecast\b", r"\bpredictions?\b.*\b20\d\d\b",
+    r"\bpresale\b", r"\bpre-sale\b", r"\btokens? sold\b",
+    r"\bignites demand\b", r"\bnext 100x\b", r"\b\d+x\b.*\bgains?\b",
+    r"\bbest (crypto|coins?|altcoins?) to buy\b", r"\btop \d+ (crypto|coins?|altcoins?)\b",
+    r"\bwhale alert\b", r"\bgiveaway\b", r"\bairdrop\b.*\bclaim\b",
+    r"- youtube$", r"\byoutube\b",
+)
+NOISE_LINK_PATTERNS = (
+    r"youtube\.com", r"youtu\.be", r"medium\.com", r"prnewswire\.com", r"globenewswire\.com",
+    r"accesswire\.com", r"newsbtc\.com/(?:news/)?press", r"/sponsored/", r"/press-release",
+)
+_NOISE_TITLE_RE = re.compile("|".join(NOISE_TITLE_PATTERNS))
+_NOISE_LINK_RE = re.compile("|".join(NOISE_LINK_PATTERNS))
+
+
+def is_noise_headline(title: str, link: str = "") -> str | None:
+    """Reden (string) als de kop ruis is, anders None."""
+    t = (title or "").lower()
+    m = _NOISE_TITLE_RE.search(t)
+    if m:
+        return f"titel: '{m.group(0)}'"
+    m = _NOISE_LINK_RE.search((link or "").lower())
+    if m:
+        return f"bron: '{m.group(0)}'"
+    return None
+
+
 def normalize_headline(title: str) -> str:
     """
     NIEUW (10 sep 2026): sleutel voor ontdubbeling over bronnen en
@@ -147,6 +182,11 @@ class RssNewsClient:
                 if item_id in seen_ids:
                     continue  # zelfde artikel via meerdere feeds
                 seen_ids.add(item_id)
+
+                ruis = is_noise_headline(title, link)
+                if ruis:
+                    print(f"[nieuws] {asset}: ruis overgeslagen ({ruis}): {title[:80]}")
+                    continue
 
                 items.append(RssNewsItem(
                     id=item_id, title=title, summary=summary,
