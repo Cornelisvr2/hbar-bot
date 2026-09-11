@@ -86,13 +86,23 @@ async def main():
     from postgres_client import PostgresClient
     db = PostgresClient()
     await db.connect()
+    van = a[a.index("--van") + 1] if "--van" in a else None
+    tot = a[a.index("--tot") + 1] if "--tot" in a else None
     async with db._pool.acquire() as conn:
         rows = await conn.fetch("SELECT ts, close FROM candles_5m WHERE symbol='HBAR' ORDER BY ts")
     dagen, prijs = dagreeks(rows)
+    if van or tot:
+        from datetime import date as _d
+        v = _d.fromisoformat(van) if van else dagen[0]
+        t = _d.fromisoformat(tot) if tot else dagen[-1]
+        paar = [(d, p_) for d, p_ in zip(dagen, prijs) if v <= d <= t]
+        dagen = [d for d, _ in paar]; prijs = [p_ for _, p_ in paar]
     print(f"\nPool-instelling optimalisatie (muntjes), HBAR {dagen[0]} .. {dagen[-1]}")
     print(f"Koers ${prijs[0]:.5f} -> ${prijs[-1]:.5f} | fee/swap {fee*100:.1f}% | "
           f"ijk: {basis_apr:.0f}% APR bij ±{basis_breedte:.0f}% breedte\n")
-    print(f"  {'breedte':>8s} {'drempel':>8s}   {'eind-munt':>10s} {'vs start':>9s} {'herbal':>7s} {'in-range':>9s}")
+    # referentie: gewoon HBAR vasthouden = de start-muntjes, onveranderd
+    print(f"  Referentie: HBAR vasthouden = {INLEG_MUNT:.0f} muntjes (0%, per definitie)\n")
+    print(f"  {'breedte':>8s} {'drempel':>8s}   {'eind-munt':>10s} {'vs hold':>9s} {'herbal':>7s} {'in-range':>9s}")
     beste = None
     for breedte in (0.03, 0.05, 0.08, 0.10, 0.15, 0.20, 0.30):
         for drempel in (0.5, 0.7, 0.9):
