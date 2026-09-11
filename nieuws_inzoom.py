@@ -131,7 +131,8 @@ def cluster(events):
 async def main():
     a = sys.argv
     asset = a[a.index("--asset") + 1] if "--asset" in a else "HBAR"
-    sinds = a[a.index("--sinds") + 1] if "--sinds" in a else "2025-09-01"
+    sinds_str = a[a.index("--sinds") + 1] if "--sinds" in a else "2025-09-01"
+    sinds = datetime.fromisoformat(sinds_str).replace(tzinfo=timezone.utc)
     min_n = int(a[a.index("--min-n") + 1]) if "--min-n" in a else 5
 
     from postgres_client import PostgresClient
@@ -143,7 +144,7 @@ async def main():
         rows = await conn.fetch(
             """SELECT category, novelty, magnitude_guess, event_key, published_at
                FROM news_events
-               WHERE (asset=$1 OR ($1='BTC' AND asset='MACRO')) AND published_at >= $2::timestamptz
+               WHERE (asset=$1 OR ($1='BTC' AND asset='MACRO')) AND published_at >= $2
                ORDER BY published_at""", asset, sinds)
     meet = R[asset]
     btc = R["BTC"]
