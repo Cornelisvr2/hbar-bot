@@ -278,6 +278,15 @@ class RegimeOrchestrator:
 
         self._cached_btc_score = 0.0
         self._cached_hbar_score = 0.0
+        # FASE-STRATEGIE (11 sep 2026): trage MA200-trend bepaalt het regime
+        # (BULL->HBAR, BEAR->USDC, SIDEWAYS->pool). De enige actieve strategie
+        # die op 2 jaar data standhield. FASE_MODE: off (nieuws-score stuurt,
+        # oud gedrag) | shadow (fase logt alleen) | live (fase stuurt). Bij
+        # twijfel/fout valt alles terug op het bestaande gedrag.
+        self._fase_mode = os.environ.get("FASE_MODE", "off").lower()
+        self._fase_vorige = None
+        self._fase_dagprijzen = []
+        self._fase_laatste_fetch = 0.0
         # Volatility_sigma-caches (28 aug 2026, voor het GBM-range-model) --
         # 0.5 als neutrale startwaarde, zelfde als de fallback bij een
         # mislukte LLM-analyse.
@@ -2102,6 +2111,35 @@ class RegimeOrchestrator:
 
         return MODERATE_ZONE_CONFIDENCE_LEVEL if self._in_moderate_zone else 0.80
 
+    def _bepaal_fase_regime(self) -> "Regime | None":
+        """
+        FASE-STRATEGIE (11 sep 2026): geeft het door de MA200-trend gewenste
+        Regime terug, of None als de fase uit staat / niet te bepalen is.
+        Haalt 1x/dag dagelijkse HBAR-closes op (Binance) en cachet ze.
+        Faalt stil -> None, zodat het bestaande gedrag intact blijft.
+        """
+        if self._fase_mode == "off":
+            return None
+        try:
+            from fase_signaal import bepaal_fase, FASE_NAAR_REGIME
+            # dagprijzen 1x per 6 uur verversen (dagtrend verandert traag)
+            if time.time() - self._fase_laatste_fetch > 6 * 3600 or not self._fase_dagprijzen:
+                start = time.time() - 260 * 86400
+                kl = self.binance_klines.fetch_range("HBAR", start, time.time(),
+                                                     interval="1d", pause_seconds=0.2)
+                self._fase_dagprijzen = [k.close for k in kl]
+                self._fase_laatste_fetch = time.time()
+            if len(self._fase_dagprijzen) < 30:
+                return None
+            res = bepaal_fase(self._fase_dagprijzen, self._fase_vorige)
+            self._fase_vorige = res.fase
+            regime = Regime[FASE_NAAR_REGIME[res.fase]]
+            print(f"[fase] {res.onderbouwing} -> gewenst regime {regime.value} (modus: {self._fase_mode})")
+            return regime
+        except Exception as e:
+            print(f"[fase] bepaling mislukt ({e}) -- valt terug op bestaand gedrag.")
+            return None
+
     def _determine_target_regime(self, combined_score: float) -> Regime:
         """
         Hysterese toegevoegd (30 aug 2026, op verzoek) -- gebruikt
@@ -2597,6 +2635,20 @@ class RegimeOrchestrator:
                           "kapitaal onaangeroerd, wordt periodiek opnieuw geprobeerd.")
 
         target_regime = self._determine_target_regime(combined_score)
+
+        # FASE-STRATEGIE (11 sep 2026): de trage MA200-trend bepaalt het
+        # regime i.p.v. de (niet-voorspellende) nieuws-score. In 'shadow'
+        # alleen loggen; in 'live' overschrijft de fase het target_regime.
+        fase_regime = self._bepaal_fase_regime()
+        if fase_regime is not None:
+            if self._fase_mode == "live":
+                if fase_regime != target_regime:
+                    print(f"[fase] LIVE: overschrijft {target_regime.value} -> {fase_regime.value}")
+                target_regime = fase_regime
+            elif self._fase_mode == "shadow":
+                if fase_regime != target_regime:
+                    print(f"[fase] SCHADUW: zou {target_regime.value} -> {fase_regime.value} zetten "
+                          f"(nu niet uitgevoerd)")
 
         # LAAG 7 event-risico-kalender (10 sep 2026): binnen ±2u van een
         # geplande macro-gebeurtenis (CPI, FOMC, NFP, ETF-besluit) geen
