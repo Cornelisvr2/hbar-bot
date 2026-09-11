@@ -35,7 +35,12 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-BASISNIVEAU_Z = 0.80      # E|z| voor normaalverdeling = 0.798
+# Basisniveau wordt GEMETEN (10 sep 2026): E|z| op willekeurige momenten in
+# dezelfde reeks. Cryptokoersen zijn niet normaal-verdeeld (dikke staarten),
+# dus de theoretische 0,80 klopt niet -- met een gemeten baseline betekent
+# gewicht 1,00 echt "niet groter dan een willekeurig moment". Wordt per asset
+# gevuld door meet_basisniveau(); 0,80 is alleen de fallback.
+BASISNIVEAU_Z = {"BTC": 0.80, "HBAR": 0.80}
 RUIS_GRENS = 1.10
 MIN_N_RICHTING = 20
 HORIZONS = (1, 4, 24)
@@ -126,6 +131,24 @@ async def laad_reeksen(db):
     return uit
 
 
+def meet_basisniveau(reeksen, n=3000):
+    """E|z op 4u| op n willekeurige momenten per asset -> echte 1,00-referentie."""
+    import random
+    random.seed(42)
+    for sym, R in reeksen.items():
+        if len(R.t) < 500:
+            continue
+        zs = []
+        for _ in range(n):
+            i = random.randint(0, len(R.t) - 1)
+            z = R.z(R.t[i], 4)
+            if z is not None:
+                zs.append(abs(z))
+        if zs:
+            BASISNIVEAU_Z[sym] = sum(zs) / len(zs)
+    print(f"[event-study] gemeten basisniveau E|z|4u: " + ", ".join(f"{k}={v:.2f}" for k, v in BASISNIVEAU_Z.items()))
+
+
 async def labelen(db, reeksen):
     nu = datetime.now(timezone.utc)
     async with db._pool.acquire() as conn:
@@ -161,13 +184,14 @@ async def labelen(db, reeksen):
     print(f"[event-study] {n} gelabeld")
 
 
-def _groep_stats(items):
+def _groep_stats(items, asset="BTC"):
     """items: lijst (abn4, exc4_of_None). -> gewicht, richting, n"""
     zs = [a for a, _ in items if a is not None]
     n = len(zs)
     if n == 0:
         return 1.0, None, 0
-    ruw = (sum(abs(z) for z in zs) / n) / BASISNIVEAU_Z
+    basis = BASISNIVEAU_Z.get(asset, 0.80)
+    ruw = (sum(abs(z) for z in zs) / n) / basis
     krimp = n / (n + 20)                      # n=20 -> half tussen 1 en ruw
     gewicht = 1.0 + krimp * (ruw - 1.0)
     if gewicht <= RUIS_GRENS:
@@ -196,7 +220,7 @@ async def gewichten(db):
         groepen[(meetasset, "cat_nov", f"{r['category']}|{r['novelty']}")].append(item)
     uit = []
     for (asset, dim, val), items in groepen.items():
-        g, d, n = _groep_stats(items)
+        g, d, n = _groep_stats(items, asset)
         uit.append((asset, dim, val, g, d, n))
     async with db._pool.acquire() as conn:
         await conn.executemany(
@@ -207,7 +231,11 @@ async def gewichten(db):
     print(f"[event-study] {len(uit)} gewichten bijgewerkt")
 
 
-async def rapport(db):
+def kwartaal_asset(q):
+    return "BTC"  # kwartaal-tabel mengt assets; BTC-basis als benadering
+
+
+async def rapport(db, reeksen=None):
     async with db._pool.acquire() as conn:
         ev = await conn.fetch(
             """SELECT asset, entity, category, novelty, magnitude_guess, event_key, headline, published_at, source_feed,
@@ -262,10 +290,11 @@ async def rapport(db):
         rijen = []
         for (j, key), items in top:
             x = max(items, key=lambda r: abs(r["abn_ret_4h"]))
-            rijen.append((x["published_at"].strftime("%m-%d"), x["category"], x["event_key"][:40], len(items),
-                          f"{x['abn_ret_1h'] or 0:+.1f}", f"{x['abn_ret_4h']:+.1f}", f"{x['abn_ret_24h'] or 0:+.1f}"))
-        tabel(f"{jaar}: grootste bewegingen na nieuws (z na 1u / 4u / 24u)", rijen,
-              ["datum", "categorie", "gebeurtenis", "koppen", "1u", "4u", "24u"])
+            rijen.append((x["published_at"].strftime("%m-%d"), x["asset"], x["category"],
+                          (x["source_feed"] or "?")[:22], x["event_key"][:34], len(items),
+                          f"{x['abn_ret_4h']:+.1f}", f"{x['abn_ret_24h'] or 0:+.1f}"))
+        tabel(f"{jaar}: grootste bewegingen na nieuws (z na 4u / 24u)", rijen,
+              ["datum", "asset", "categorie", "bron", "gebeurtenis", "koppen", "4u", "24u"])
 
     # 5. per kwartaal: welke categorie deed ertoe (regime-drift)
     per_q = defaultdict(lambda: defaultdict(list))
@@ -277,7 +306,7 @@ async def rapport(db):
     for q in sorted(per_q):
         cats = sorted(per_q[q].items(), key=lambda kv: -(sum(kv[1]) / len(kv[1])))
         rijen.append((q, sum(len(v) for v in per_q[q].values()),
-                      ", ".join(f"{c} ({sum(v) / len(v) / BASISNIVEAU_Z:.1f})" for c, v in cats[:3] if len(v) >= 5)))
+                      ", ".join(f"{c} ({sum(v) / len(v) / BASISNIVEAU_Z.get(kwartaal_asset(q), 0.80):.1f})" for c, v in cats[:3] if len(v) >= 5)))
     tabel("Per kwartaal: categorieën met de grootste beweging (gewicht)", rijen, ["kwartaal", "n", "top-3 categorieën"])
 
     tekst = "\n".join(L)
@@ -294,13 +323,18 @@ async def main():
     await db.connect()
     a = sys.argv
     alles = "--alles" in a
+    reeksen = None
     if alles or "--labelen" in a:
         reeksen = await laad_reeksen(db)
         await labelen(db, reeksen)
+    if alles or "--gewichten" in a or "--rapport" in a:
+        if reeksen is None:
+            reeksen = await laad_reeksen(db)
+        meet_basisniveau(reeksen)
     if alles or "--gewichten" in a:
         await gewichten(db)
     if alles or "--rapport" in a:
-        await rapport(db)
+        await rapport(db, reeksen)
     if not any(x in a for x in ("--alles", "--labelen", "--gewichten", "--rapport")):
         print(__doc__)
 
