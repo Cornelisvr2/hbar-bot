@@ -46,9 +46,14 @@ INDICATOREN = {
 DEFAULT_RELEASE_UTC = time(13, 30)  # ~08:30 ET
 
 
+import re as _re
+def _mask(t):
+    return _re.sub(r"(api_key)=[^&\s]+", r"\1=***", str(t))
+
 def _get(url, params):
     r = requests.get(url, params=params, headers=UA, timeout=30)
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code}: {_mask(r.url)}")
     return r.json()
 
 
@@ -57,23 +62,35 @@ def haal_indicator(sid, key, start):
     naam, _impact = INDICATOREN[sid]
     # observaties met hun WERKELIJKE publicatiemoment (realtime_start = wanneer de waarde
     # voor het eerst gepubliceerd werd). output_type=4 geeft de eerste release per periode.
+    # realtime_start/_end over de hele periode -> FRED geeft elke observatie
+    # met de datum waarop de waarde voor het eerst beschikbaar was (de
+    # release). De observatie-datum (o["date"]) is de PERIODE (bv. de maand),
+    # realtime_start is de PUBLICATIEDAG -- die willen we als event-tijd.
+    vandaag = datetime.now(timezone.utc).date().isoformat()
     data = _get("https://api.stlouisfed.org/fred/series/observations", {
         "series_id": sid, "api_key": key, "file_type": "json",
-        "observation_start": start, "output_type": 4,
+        "observation_start": start,
+        "realtime_start": start, "realtime_end": vandaag,
     })
-    vorige = None
+    # per periode-datum de VROEGSTE realtime_start = eerste release
+    eerste = {}
     for o in data.get("observations", []):
         val = o.get("value")
         if val in (None, ".", ""):
             continue
-        try:
-            actual = float(val)
-        except ValueError:
+        d = o.get("date"); rt = o.get("realtime_start")
+        if d is None or rt is None:
             continue
-        # publicatiedatum: realtime_start is wanneer FRED de waarde kreeg (= releasedag)
-        pub = o.get("realtime_start") or o.get("date")
+        if d not in eerste or rt < eerste[d][0]:
+            try:
+                eerste[d] = (rt, float(val))
+            except ValueError:
+                continue
+    vorige = None
+    for d in sorted(eerste):
+        rt, actual = eerste[d]
         try:
-            dag = datetime.fromisoformat(pub)
+            dag = datetime.fromisoformat(rt)
         except ValueError:
             continue
         ts = datetime.combine(dag.date(), DEFAULT_RELEASE_UTC, tzinfo=timezone.utc)
