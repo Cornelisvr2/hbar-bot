@@ -84,42 +84,47 @@ async def main():
     print(f"{len(kern)} kern-events, {len(binnen)} binnen de candle-periode | venster -{voor}m..+{na}m | fee {fee*100:.1f}%\n")
 
     # bouw voor elke strategie een lijst (ts_uit, ts_in, wil_hbar_in_venster)
+    # Overlappende event-vensters samenvoegen (CPI+Core CPI+PPI vallen vaak
+    # samen): anders swapt de bot binnen elkaar overlappende vensters heen en
+    # weer -> een swap-storm die het kapitaal aan fees opeet. Eén venster =
+    # hooguit 2 swaps (uit vóór, terug ná).
+    ruwe = sorted(((e["ts"].timestamp() - voor * 60, e["ts"].timestamp() + na * 60, e) for e in binnen),
+                  key=lambda x: x[0])
+    vensters = []
+    for s0, s1, e in ruwe:
+        if vensters and s0 <= vensters[-1][1]:
+            vensters[-1] = (vensters[-1][0], max(vensters[-1][1], s1), vensters[-1][2] + [e])
+        else:
+            vensters.append((s0, s1, [e]))
+
     def simuleer(modus):
-        eenheden = INLEG / prijs.c[0]  # start volledig in HBAR
+        eenheden = INLEG / prijs.c[0]
         usdc = 0.0
-        in_hbar = True
         swaps = 0
         bijdragen = []
-        for e in sorted(binnen, key=lambda x: x["ts"]):
-            t0 = e["ts"].timestamp()
-            p_uit = prijs.at(t0 - voor * 60)
-            p_in = prijs.at(t0 + na * 60)
+        for s0, s1, evs in vensters:
+            p_uit = prijs.at(s0)
+            p_in = prijs.at(s1)
             if p_uit is None or p_in is None:
                 continue
-            # 1) uitstappen vóór het event (naar USDC)
-            if in_hbar:
-                usdc = eenheden * p_uit * (1 - fee); eenheden = 0.0; in_hbar = False; swaps += 1
-            # 2) na het event: terug of niet
-            if modus == "vlak":
-                terug = True
-            elif modus == "surprise":
-                s = sd.get(sleutel(e["name"]), None)
-                if e["actual"] is None or e["estimate"] is None or s is None:
-                    terug = True  # geen data -> gewoon terug
-                else:
-                    verrassing = (e["actual"] - e["estimate"]) / s
-                    # hogere inflatie/rente = negatief voor risico; hoger dan verwacht CPI/PPI/rente -> NIET terug
+            # uit vóór het venster
+            usdc = eenheden * p_uit * (1 - fee); eenheden = 0.0; swaps += 1
+            # terug ná het venster? (vlak = altijd; surprise = alleen bij niet-slechte verrassing)
+            if modus == "surprise":
+                slecht = False
+                for e in evs:
                     naam = (e["name"] or "").lower()
-                    slecht_als_hoog = any(k in naam for k in ("cpi", "ppi", "pce", "inflation", "rate", "funds"))
-                    mee = (-verrassing if slecht_als_hoog else verrassing)
-                    terug = mee >= -0.3  # alleen in USDC blijven bij duidelijk slechte verrassing
+                    if e["actual"] is not None and e["previous"] is not None:
+                        richting = e["actual"] - e["previous"]
+                        slecht_als_hoog = any(k in naam for k in ("cpi", "ppi", "pce", "inflation", "rate", "funds"))
+                        if (richting > 0) == slecht_als_hoog and abs(richting) > 0:
+                            slecht = True
+                terug = not slecht
             else:
                 terug = True
             if terug:
-                eenheden = (usdc / p_in) * (1 - fee) if usdc > 0 else eenheden; usdc = 0.0 if usdc > 0 else usdc
-                if not in_hbar:
-                    in_hbar = True; swaps += 1
-            bijdragen.append((e["name"][:32], (p_in / p_uit - 1) * 100, terug))
+                eenheden = (usdc / p_in) * (1 - fee); usdc = 0.0; swaps += 1
+            bijdragen.append((evs[0]["name"][:32], (p_in / p_uit - 1) * 100, terug))
         eind = usdc + eenheden * prijs.c[-1]
         return eind, swaps, bijdragen
 
