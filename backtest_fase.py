@@ -110,17 +110,19 @@ async def main():
     bevestiging = int(a[a.index("--bevestiging") + 1]) if "--bevestiging" in a else 3
     fee = float(a[a.index("--fee") + 1]) / 100 if "--fee" in a else 0.008
     apr = float(a[a.index("--apr") + 1]) if "--apr" in a else 22.0
+    symbool = a[a.index("--symbool") + 1] if "--symbool" in a else "HBAR"
 
     from postgres_client import PostgresClient
     db = PostgresClient()
     await db.connect()
     async with db._pool.acquire() as conn:
-        rows = await conn.fetch("SELECT ts, close FROM candles_5m WHERE symbol='HBAR' ORDER BY ts")
+        rows = await conn.fetch("SELECT ts, close FROM candles_5m WHERE symbol=$1 ORDER BY ts", symbool)
     dagen, prijs = dagreeks(rows)
     hold = INLEG * (prijs[-1] / prijs[0])
-    print(f"\nFase-strategie op HBAR, {dagen[0]} .. {dagen[-1]} ({len(dagen)} dagen)")
+    print(f"\nFase-strategie op {symbool}, {dagen[0]} .. {dagen[-1]} ({len(dagen)} dagen)")
     print(f"HBAR-koers ${prijs[0]:.5f} -> ${prijs[-1]:.5f} ({(prijs[-1]/prijs[0]-1)*100:+.1f}%)\n")
-    print(f"Referenties:  hold €{hold:.0f} ({(hold/INLEG-1)*100:+.0f}%) · USDC €{INLEG:.0f} · kale pool ~€2577\n")
+    pool_ref = "kale pool ~€2577" if symbool == "HBAR" else "n.v.t. (geen HBAR-pool)"
+    print(f"Referenties:  hold €{hold:.0f} ({(hold/INLEG-1)*100:+.0f}%) · USDC €{INLEG:.0f} · {pool_ref}\n")
 
     if "--grid" in a:
         print(f"  {'band':>5s} {'bev':>4s}   {'eind €':>8s}  {'%':>6s}  {'swaps':>5s}")
