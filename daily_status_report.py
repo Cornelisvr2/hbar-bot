@@ -132,10 +132,27 @@ async def main():
         # BUGFIX (30 aug 2026): pool_price_sauce_per_hbar i.p.v.
         # hbar_price_usd -- deze functie werkt met tick_lower/tick_upper,
         # die in de pool-eigen schaal zijn uitgedrukt, niet in USD.
-        positie_hbar, positie_sauce = compute_position_amounts(
+        #
+        # BUGFIX (11 sep 2026, KRITIEK): token0/token1-decimalen waren
+        # HARDCODED op (8, 6) = de HBAR=token0-volgorde van TESTNET. Op
+        # MAINNET is USDC token0 (adres 0x06f89a < WHBAR 0x163b5a), dus
+        # token0=USDC (6 dec), token1=WHBAR (8 dec) -- precies omgekeerd.
+        # Daardoor kwam de positiewaarde ~factor 100-1000 te laag uit
+        # ($0,16 i.p.v. de echte ~$195 die SaucerSwap toont). De bot ZELF
+        # rekende intern al correct (via _estimate_position_value_hbar,
+        # 0,07% L-aandeel * ~$700k TVL); alleen dit RAPPORT stond fout.
+        # Nu dynamisch op de canonieke adres-volgorde, en de output-
+        # toewijzing (welke amount is HBAR) volgt diezelfde volgorde.
+        _hbar_is_token0 = int(base.whbar_token, 16) < int(quote_address, 16)
+        if _hbar_is_token0:
+            _t0_dec, _t1_dec = 8, base.usdc_decimals
+        else:
+            _t0_dec, _t1_dec = base.usdc_decimals, 8
+        _amt0, _amt1 = compute_position_amounts(
             liquidity, positie["tick_lower"], positie["tick_upper"],
-            pool_price_sauce_per_hbar, token0_decimals=8, token1_decimals=6,
+            pool_price_sauce_per_hbar, token0_decimals=_t0_dec, token1_decimals=_t1_dec,
         )
+        positie_hbar, positie_sauce = (_amt0, _amt1) if _hbar_is_token0 else (_amt1, _amt0)
         positie_waarde_usd = positie_hbar * hbar_price_usd + positie_sauce * sauce_price_usd
 
         # Opgebouwde, nog niet geclaimde fees (1 sep 2026, op verzoek) --
@@ -153,8 +170,17 @@ async def main():
             fee_amount0_raw, fee_amount1_raw = position_manager.functions.collect(
                 (positie["token_id"], client.address, UINT128_MAX, UINT128_MAX)
             ).call({"from": client.address})
-            fee_hbar = fee_amount0_raw / (10 ** 8)
-            fee_sauce = fee_amount1_raw / (10 ** 6)
+            # BUGFIX (11 sep 2026): fee0/fee1 werden vast als (HBAR, quote)
+            # gelezen -- op MAINNET is token0 USDC en token1 WHBAR, dus
+            # omgekeerd. Gaf de onmogelijke "192,64 SAUCE"-fee op een
+            # positie van een paar honderd dollar. Nu op dezelfde canonieke
+            # volgorde als de positiewaarde hierboven.
+            if _hbar_is_token0:
+                fee_hbar = fee_amount0_raw / (10 ** 8)
+                fee_sauce = fee_amount1_raw / (10 ** base.usdc_decimals)
+            else:
+                fee_sauce = fee_amount0_raw / (10 ** base.usdc_decimals)
+                fee_hbar = fee_amount1_raw / (10 ** 8)
         except Exception as e:
             # Defensief (1 sep 2026): dit is een informatief, niet-
             # kritiek onderdeel van het rapport -- een mislukking hier
