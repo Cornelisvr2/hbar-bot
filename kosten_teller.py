@@ -1,99 +1,90 @@
 """
-kosten_teller.py -- totale kosten die de bot heeft betaald.
+kosten_teller.py -- totale kosten van de bot, RECHTSTREEKS van de chain.
 
-De trades-tabel logt geen kosten, maar wel tx_hash + de bedragen. Twee
-kostensoorten worden hier opgeteld:
+Leest ALLE transacties van het bot-account uit de Hedera Mirror Node
+(dezelfde bron als HashScan) en telt de werkelijk betaalde fees op. Geen
+afhankelijkheid van de trades-tabel (die logt actual_amount_out niet).
 
-  1. NETWERK/GAS-fee per transactie -- opgehaald via de Hedera Mirror Node
-     op tx_hash (charged_tx_fee, in tinybar -> HBAR).
-  2. SWAP-fee/slippage -- het verschil tussen estimated_amount_out en
-     actual_amount_out per swap (wat je kwijt was aan de pool + slippage).
+  - charged_tx_fee per transactie (tinybar -> HBAR): het EXACTE netwerk/gas-
+    bedrag dat het account heeft betaald, voor elke tx die het account als
+    payer had.
+Telt ook hoeveel transacties er waren en splitst naar type (crypto/contract).
 
-Geeft het totaal in HBAR en USDC-equivalent, zodat het dashboard kan tonen:
-"Fees betaald" naast "Fees verdiend", en het netto resultaat.
+Het account-ID wordt afgeleid uit de sleutel (publiek adres -> Mirror Node),
+of via --account 0.0.xxxxx.
 
     docker compose run --rm -T hbar-bot python3 kosten_teller.py
-    docker compose run --rm -T hbar-bot python3 kosten_teller.py --json   # voor het dashboard
+    docker compose run --rm -T hbar-bot python3 kosten_teller.py --account 0.0.10819646 --json
 """
-import asyncio
 import json
 import os
 import sys
 
 import requests
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 UA = {"User-Agent": "hbar-bot-kosten/1.0"}
 
 
-def netwerk_fee_hbar(mirror_url, tx_hash):
-    """charged_tx_fee (tinybar) -> HBAR, via de Mirror Node. 0 bij niet gevonden."""
-    if not tx_hash:
-        return 0.0
-    try:
-        # Mirror Node accepteert het transaction-id-formaat; tx_hash kan een
-        # eth-hash zijn -> zoek via /contracts/results/{hash} voor de fee.
-        r = requests.get(f"{mirror_url}/api/v1/contracts/results/{tx_hash}", headers=UA, timeout=10)
-        if r.status_code == 200:
-            d = r.json()
-            # gas_used * gas_price geeft de gaskost; charged in tinybar
-            fee_tinybar = d.get("amount", 0) or 0
-            gas_used = d.get("gas_used", 0) or 0
-            gas_price = d.get("gas_price", 0) or 0
-            # sommige velden zijn hex
-            def _num(x):
-                if isinstance(x, str) and x.startswith("0x"):
-                    return int(x, 16)
-                return x or 0
-            kost_tinybar = _num(gas_used) * _num(gas_price)
-            return kost_tinybar / 1e8  # tinybar -> HBAR
-    except Exception:
-        pass
-    return 0.0
+def account_id(mirror):
+    if "--account" in sys.argv:
+        return sys.argv[sys.argv.index("--account") + 1]
+    from eth_account import Account
+    pk = (os.environ.get("HEDERA_LP_PRIVATE_KEY") or os.environ.get("HEDERA_BOT_PRIVATE_KEY") or "").removeprefix("0x")
+    evm = Account.from_key("0x" + pk).address
+    r = requests.get(f"{mirror}/api/v1/accounts/{evm}?limit=1", headers=UA, timeout=15)
+    return r.json().get("account")
 
 
-async def main():
+def main():
     json_uit = "--json" in sys.argv
-    from postgres_client import PostgresClient
     from config import NETWORK_SETTINGS
     mirror = NETWORK_SETTINGS[os.environ.get("HEDERA_NETWORK", "mainnet")]["mirror_node_url"]
-    db = PostgresClient()
-    await db.connect()
-    async with db._pool.acquire() as conn:
-        trades = await conn.fetch(
-            "SELECT tx_hash, amount_in, estimated_amount_out, actual_amount_out, direction, status "
-            "FROM trades WHERE status = 'success' ORDER BY created_at")
+    acc = account_id(mirror)
+    if not acc:
+        print("Kon account-ID niet bepalen."); return
 
-    n_trades = len(trades)
-    swap_verlies_hbar = 0.0   # slippage + pool-fee, ruw in HBAR-equivalent
-    gas_hbar = 0.0
-    for t in trades:
-        # swap-verlies: verschil geschat vs werkelijk (in de uit-token)
-        est, act = t["estimated_amount_out"], t["actual_amount_out"]
-        if est and act and est > act:
-            # verlies uitgedrukt als fractie van de trade; ruw naar HBAR via amount_in
-            frac = (est - act) / est
-            swap_verlies_hbar += frac * (t["amount_in"] or 0)
-        gas_hbar += netwerk_fee_hbar(mirror, t["tx_hash"])
+    totaal_fee_tinybar = 0
+    per_type = {}
+    n = 0
+    url = f"{mirror}/api/v1/transactions?account.id={acc}&limit=100&order=asc"
+    pagina = 0
+    while url and pagina < 200:   # ruime bovengrens
+        r = requests.get(url, headers=UA, timeout=20)
+        if r.status_code != 200:
+            break
+        d = r.json()
+        for tx in d.get("transactions", []):
+            # alleen tx's waar DIT account de fee betaalde (payer)
+            if tx.get("charged_tx_fee") and tx.get("transaction_id", "").startswith(acc):
+                fee = tx["charged_tx_fee"]
+                totaal_fee_tinybar += fee
+                t = tx.get("name", "onbekend")
+                per_type[t] = per_type.get(t, 0) + fee
+                n += 1
+        nxt = (d.get("links") or {}).get("next")
+        url = f"{mirror}{nxt}" if nxt else None
+        pagina += 1
 
-    totaal_hbar = swap_verlies_hbar + gas_hbar
+    totaal_hbar = totaal_fee_tinybar / 1e8
     resultaat = {
-        "aantal_trades": n_trades,
-        "gas_hbar": round(gas_hbar, 4),
-        "swap_verlies_hbar": round(swap_verlies_hbar, 2),
-        "totaal_kosten_hbar": round(totaal_hbar, 2),
+        "account": acc,
+        "aantal_betaalde_tx": n,
+        "totaal_gas_hbar": round(totaal_hbar, 4),
+        "per_type_hbar": {k: round(v / 1e8, 4) for k, v in sorted(per_type.items(), key=lambda x: -x[1])},
     }
     if json_uit:
         print(json.dumps(resultaat))
     else:
-        print(f"\nKostenteller ({n_trades} geslaagde trades)")
-        print(f"  Gas/netwerk-fees:   {gas_hbar:.4f} HBAR")
-        print(f"  Swap-fee+slippage:  {swap_verlies_hbar:.2f} HBAR (ruwe schatting)")
-        print(f"  Totaal betaald:     {totaal_hbar:.2f} HBAR")
-        print("\nLet op: swap-verlies is een ruwe schatting uit estimated vs actual;")
-        print("gas komt exact van de Mirror Node. Voor het dashboard: --json.")
+        print(f"\nKosten van account {acc} (rechtstreeks van de chain)")
+        print(f"  Transacties met fee: {n}")
+        print(f"  Totaal gas/netwerk:  {totaal_hbar:.4f} HBAR")
+        print(f"  Per type:")
+        for k, v in resultaat["per_type_hbar"].items():
+            print(f"    {k:28s} {v:.4f} HBAR")
+        print("\nNB: dit is de NETWERK-fee (gas), exact van de chain. De pool-swap-fee")
+        print("(0,3% per swap) zit verrekend in de swap-bedragen zelf, niet als aparte")
+        print("chain-fee -- die schatten we apart uit het aantal swaps x 0,3%.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
