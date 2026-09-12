@@ -494,12 +494,15 @@
   </div>
 
   <div class="panel">
-    <div class="panel-title">Totaaloverzicht (sinds start)</div>
+    <div class="panel-title">Kosten &amp; rendement <span style="color: var(--text-muted); font-weight: normal;">(sinds start)</span></div>
+    <div class="stat-line"><span class="label">Fee-inkomsten (30d)</span><span class="val status-ok">+{{ "%.4f"|format(d.total_income_30d) }} HBAR</span></div>
+    <div class="stat-line"><span class="label">Kosten / gas (30d)</span><span class="val" style="color: var(--loss);">−{{ "%.4f"|format(d.total_costs_30d) }} HBAR</span></div>
     {% if d.total_deposits_hbar is not none %}
-    <div class="stat-line"><span class="label">Totaal bijgestort kapitaal</span><span class="val">{{ "%.4f"|format(d.total_deposits_hbar) }} HBAR</span></div>
-    <div class="stat-line"><span class="label">Netto resultaat</span><span class="val {{ 'status-ok' if d.net_result_usd is not none and d.net_result_usd >= 0 else '' }}" style="{{ 'color: var(--loss);' if d.net_result_usd is not none and d.net_result_usd < 0 else '' }}">{{ "%+.2f"|format(d.net_result_usd) }} USD</span></div>
+    <div class="stat-line"><span class="label">Totaal ingelegd</span><span class="val">{{ "%.2f"|format(d.total_deposits_hbar) }} HBAR <span style="color: var(--text-muted);">(≈ ${{ "%.0f"|format(d.total_deposits_hbar * d.hbar_price_usd) }})</span></span></div>
+    <div class="stat-line"><span class="label">Waarde nu (wallet + pool)</span><span class="val">${{ "%.2f"|format(d.total_value_usd) }}</span></div>
+    <div class="stat-line"><span class="label">Echt rendement</span><span class="val {{ 'status-ok' if d.net_result_usd is not none and d.net_result_usd >= 0 else '' }}" style="font-size: 17px; {{ 'color: var(--loss);' if d.net_result_usd is not none and d.net_result_usd < 0 else '' }}">{{ "%+.2f"|format(d.net_result_usd) }} USD{% if d.total_deposits_hbar and d.total_deposits_hbar * d.hbar_price_usd > 0 %} <span style="color: var(--text-muted); font-size: 13px;">({{ "%+.1f"|format(d.net_result_usd / (d.total_deposits_hbar * d.hbar_price_usd) * 100) }}%)</span>{% endif %}</span></div>
     {% else %}
-    <div class="stat-line"><span class="label">Totaaloverzicht</span><span class="val" style="color: var(--text-muted);">Niet beschikbaar (kon mirror node niet bereiken)</span></div>
+    <div class="stat-line"><span class="label">Rendement</span><span class="val" style="color: var(--text-muted);">Niet beschikbaar (kon mirror node niet bereiken)</span></div>
     {% endif %}
   </div>
 
