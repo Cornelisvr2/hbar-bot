@@ -306,3 +306,56 @@ V2-IL-formule), toegepast op het in-pool-deel; daarnaast de bestaande
 
 BOUW: nieuw datamodel (lp_rebalance_history) + reconstructie-script + weergave.
 Hoort bij de bouw met code compleet voor ons, niet los. Nu alleen vastgelegd.
+
+## 14. Fase 2 bouwvolgorde — met exacte datavelden (12 sep, voorwerk gedaan)
+
+Fase 1 is LIVE (snel dashboard + Telegram-login). De snapshot bevat al bijna
+alle data die fase 2 nodig heeft. Bouw blok voor blok, elk apart in de browser
+te controleren. De velden hieronder zijn geverifieerd aanwezig in
+dashboard_snapshots.payload.
+
+BESCHIKBARE DATA (geverifieerd 12 sep):
+- payload.wallet: hbar, sauce, lari_sauce, lari_sauce_value_usd, value_usd
+- payload.position: hbar, sauce, fee_hbar, fee_sauce, fee_value_usd, token_id,
+  days_open, opened_at, value_usd, width_pct, tick_lower/upper,
+  price_lower/upper, in_range_pct, range_status, realized_fees_apr
+- verder in payload (uit template-gebruik): pool_apr_pct, pool_apr_breed_pct,
+  fees_apr_now/7d_pct, volume_1h/24h/7d, tvl_in_range_usd, lari_pool/our_apr_pct,
+  lari_our_share_pct, lari_our_epoch_usd, lari_realized_sauce/hbar/count,
+  total_apr_pct, projection_apr_pct, projection_30/90/180, change_*, transactions,
+  total_costs_30d, total_income_30d, total_deposits_hbar, net_result_usd,
+  chart_data_*, price_chart_data_*, hbar_price_usd/eur, macro, network,
+  quote_symbol, generated_at
+
+Het bestaande dashboard.html (734 regels) heeft al: koers, waardeverandering,
+voorspelling, positie&range (MET range-balk range-track/range-marker),
+samenstelling (wallet+positie), transactiegeschiedenis, totaaloverzicht,
+macro-analyse, scenario's, live-log. Fase 2 = HERINDELEN/AANSCHERPEN, niet
+herbouwen.
+
+BLOKKEN, in bouwvolgorde (elk apart toepassen + testen):
+1. WALLET-BLOK los: totaal ($) + per token aantal+waarde (hbar, sauce,
+   lari_sauce), bijstort-hint als wallet.hbar > ~100. Data: payload.wallet.
+2. POOL-BLOK los: inhoud (position.hbar/sauce), range-balk (bestaat al:
+   in_range_pct als marker, price_lower/upper als grenzen, range-zones geel =
+   variant B), opgebouwde fees PER TOKEN (fee_hbar + fee_sauce = fee_value_usd),
+   fee-APR + LARI-APR los. Data: payload.position + lari_*.
+3. REWARD-OVERZICHT in pool-blok: SAUCE-airdrop -- lari_realized_sauce/hbar/count,
+   lari_our_epoch_usd (/epoch, toon met +, geen ~ dat op - lijkt).
+4. MARKT & CYCLUS: vervang macro-analyse-blok. LLM-delen (score, drift,
+   uitlijning, schaduw) ERUIT (laag staat uit). Houd: BTC/HBAR trend + MA200,
+   halving-cyclus. Data: payload.macro (bevat de trend/cyclus-velden).
+5. KOSTEN & RENDEMENT: gas (kosten_teller), fees verdiend, echt rendement in $.
+   Inleg via stortingen_teller (MoonPay + euro-vraag via Telegram -- fase 3).
+6. VOORSPELLING pool-segment: laag/mediaan/hoog uit apr_historie.py (19/37/78%),
+   muntjes-groei, GEEN $-waarde (die zit in de calculator).
+7. SCENARIO-CALCULATOR: twee stappen (muntjes / waarde), zie sectie 12+13c.
+   Nieuw endpoint /api/calc dat rekent; muntjes-groei + waarde + winst + %.
+8. STATISTIEK-sectie: tijd in-range, muntjes-groei-trend, herbalanceringen+kost,
+   dagen sinds laatste, IL (pool vs hodl), fee-per-dag-grafiek. Zie sectie 10.
+9. IL-weergave (sectie 13): dashboard = gemeten pool-vs-hodl in muntjes + $ + %;
+   log = IL-historie per herbalancering (nieuwe tabel lp_rebalance_history).
+10. LOG-sectie: transactie/kosten hierheen; swap-balans + fouten vullen.
+
+Aandachtspunt: SAUCE-balans-waarschuwing bij snapshot (checksum-adres) -- werk
+weg met Web3.to_checksum_address(); breekt nu niets maar rommelt de log.
