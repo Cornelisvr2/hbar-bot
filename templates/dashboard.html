@@ -213,6 +213,18 @@
     border-radius: 4px;
     left: 0; right: 0;
   }
+  /* variant B: rand-zones (~15% aan elke kant) subtiel als waarschuwing */
+  .range-zone {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 15%;
+    background: rgba(192, 104, 90, 0.14);
+  }
+  .range-zone.links { left: 0; border-radius: 4px 0 0 4px; }
+  .range-zone.rechts { right: 0; border-radius: 0 4px 4px 0; }
+  .range-marker {
+    z-index: 2;
+  }
   .range-marker {
     position: absolute;
     top: -6px;
@@ -387,12 +399,16 @@
       <div class="panel-title">Positie &amp; range</div>
       <div class="range-track">
         <div class="range-fill"></div>
+        <div class="range-zone links"></div>
+        <div class="range-zone rechts"></div>
         <div class="range-marker" style="left: {{ d.position.in_range_pct if d.position else 50 }}%;" data-label="{{ "%.2f"|format(d.pool_price_sauce_per_hbar) }}"></div>
       </div>
       <div class="range-labels">
         <span>{{ "%.4f"|format(d.position.price_lower) if d.position else "—" }}</span>
         <span>{{ "%.4f"|format(d.position.price_upper) if d.position else "—" }}</span>
       </div>
+      <div class="stat-line"><span class="label">Inhoud</span><span class="val">{{ "%.0f"|format(d.position.hbar) if d.position else "—" }} HBAR + {{ "%.2f"|format(d.position.sauce) if d.position else "—" }} {{ d.quote_symbol }} <span style="color: var(--text-muted);">(${{ "%.0f"|format(d.position.value_usd) if d.position else "0" }})</span></span></div>
+      <div class="stat-line"><span class="label">Opgebouwde fees</span><span class="val status-ok">{{ "%.4f"|format(d.position.fee_hbar) if d.position else "0" }} HBAR + {{ "%.2f"|format(d.position.fee_sauce) if d.position else "0" }} {{ d.quote_symbol }} <span style="color: var(--text-muted);">(= ${{ "%.2f"|format(d.position.fee_value_usd) if d.position else "0.00" }})</span></span></div>
       <div class="stat-line"><span class="label">Breedte</span><span class="val">{{ "%.1f"|format(d.position.width_pct) if d.position else "—" }}%</span></div>
       <div class="stat-line"><span class="label">Afstand tot onderrand</span><span class="val">{{ "%.1f"|format(d.position.in_range_pct) if d.position else "—" }}% <span style="color: var(--text-muted);">van de range-breedte</span></span></div>
       {% if d.realized_fees_apr_pct is not none %}
