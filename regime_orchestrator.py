@@ -974,9 +974,23 @@ class RegimeOrchestrator:
                 abi=V2_POSITION_MANAGER_ABI,
             )
             UINT128_MAX = (2 ** 128) - 1
-            fee0_raw, fee1_raw = position_manager.functions.collect(
-                (self.lp_manager.state.token_id, self.rpc_client.address, UINT128_MAX, UINT128_MAX)
-            ).call({"from": self.rpc_client.address})
+            # FALLBACK-RELAY (11 sep 2026): collect() gaf op de publieke relay
+            # af en toe lege bytes ("Could not decode collect(...)"). Bij een
+            # hapering wisselt read_met_fallback naar een andere relay. Contract
+            # opnieuw binden binnen de closure, want rpc_client.w3 kan wisselen.
+            def _lees_fees():
+                pm = self.rpc_client.w3.eth.contract(
+                    address=self.lp_manager.config.position_manager_address,
+                    abi=V2_POSITION_MANAGER_ABI)
+                return pm.functions.collect(
+                    (self.lp_manager.state.token_id, self.rpc_client.address, UINT128_MAX, UINT128_MAX)
+                ).call({"from": self.rpc_client.address})
+            if hasattr(self.rpc_client, "read_met_fallback"):
+                fee0_raw, fee1_raw = self.rpc_client.read_met_fallback(_lees_fees)
+            else:
+                fee0_raw, fee1_raw = position_manager.functions.collect(
+                    (self.lp_manager.state.token_id, self.rpc_client.address, UINT128_MAX, UINT128_MAX)
+                ).call({"from": self.rpc_client.address})
             # BUGFIX (10 sep 2026): fee0 werd als HBAR gelezen -- op mainnet is
             # token0 USDC, dus de HBAR-fees werden GENEGEERD en de USDC-fees
             # met 8 i.p.v. 6 decimalen gedeeld: "geen meetbare fee-groei"

@@ -519,11 +519,19 @@ def get_live_pool_price(rpc_client, factory_address: str, token0: str, token1: s
     Geeft de prijs terug in dezelfde conventie als current_price elders
     in dit bestand (token1 per token0, mensvriendelijk).
     """
-    factory = rpc_client.w3.eth.contract(address=factory_address, abi=V2_FACTORY_ABI_MINIMAL)
-    pool_address = factory.functions.getPool(token0, token1, fee_tier).call()
-
-    pool = rpc_client.w3.eth.contract(address=pool_address, abi=POOL_SLOT0_ABI_MINIMAL)
-    slot0 = pool.functions.slot0().call()
+    # FALLBACK-RELAY (11 sep 2026): getPool/slot0 gaven op de publieke relay
+    # af en toe lege bytes ("Could not decode ..."). read_met_fallback wisselt
+    # dan automatisch naar een andere relay. Contract opnieuw binden ná een
+    # eventuele relay-wissel, want rpc_client.w3 kan veranderd zijn.
+    def _lees_pool():
+        f = rpc_client.w3.eth.contract(address=factory_address, abi=V2_FACTORY_ABI_MINIMAL)
+        pa = f.functions.getPool(token0, token1, fee_tier).call()
+        pl = rpc_client.w3.eth.contract(address=pa, abi=POOL_SLOT0_ABI_MINIMAL)
+        return pa, pl.functions.slot0().call()
+    if hasattr(rpc_client, "read_met_fallback"):
+        pool_address, slot0 = rpc_client.read_met_fallback(_lees_pool)
+    else:
+        pool_address, slot0 = _lees_pool()
     current_tick = slot0[1]
 
     raw_price = 1.0001 ** current_tick

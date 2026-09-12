@@ -39,6 +39,19 @@ HEDERA_TESTNET_CHAIN_ID = 296
 DEFAULT_MAINNET_RPC = "https://mainnet.hashio.io/api"
 DEFAULT_TESTNET_RPC = "https://testnet.hashio.io/api"
 
+# FALLBACK-RELAYS (11 sep 2026): de publieke Hashio-relay geeft af en toe
+# lege bytes terug op read-calls (collect/slot0/getPool -> "Could not decode
+# ... with return data: b''"). Bij zo'n hapering wisselt de client
+# automatisch naar de volgende relay i.p.v. de cyclus over te slaan. Alleen
+# voor READ-calls gebruikt; writes (swaps) blijven op de primaire relay
+# vanwege nonce-consistentie. Extra relays instelbaar via
+# HEDERA_RPC_FALLBACKS (komma-gescheiden).
+MAINNET_FALLBACK_RPCS = [
+    "https://mainnet.hashio.io/api",
+    "https://295.rpc.thirdweb.com",          # Hedera mainnet chain-id 295
+    "https://pool.arkhia.io/hedera/mainnet/json-rpc/v1",
+]
+
 
 @dataclass
 class NetworkConfig:
@@ -54,13 +67,44 @@ class HederaRpcClient:
         variable of secrets-manager, nooit hardcoded in code of git.
         """
         self.network = network
-        self.w3 = Web3(Web3.HTTPProvider(network.rpc_url))
-        # Hedera's relay gedraagt zich op sommige punten als een PoA-chain
-        self.w3.middleware_onion.inject(PoaMiddleware, layer=0)
+        self.w3 = self._maak_w3(network.rpc_url)
+        # fallback-relays: primaire eerst, dan de rest (zonder duplicaten)
+        extra = [u.strip() for u in os.environ.get("HEDERA_RPC_FALLBACKS", "").split(",") if u.strip()]
+        kandidaten = [network.rpc_url] + MAINNET_FALLBACK_RPCS + extra
+        self._relay_urls = list(dict.fromkeys(kandidaten))  # dedup, volgorde behouden
+        self._relay_idx = 0
 
         if not private_key.startswith("0x"):
             private_key = "0x" + private_key
         self.account = self.w3.eth.account.from_key(private_key)
+
+    @staticmethod
+    def _maak_w3(url: str) -> "Web3":
+        w3 = Web3(Web3.HTTPProvider(url))
+        w3.middleware_onion.inject(PoaMiddleware, layer=0)
+        return w3
+
+    def read_met_fallback(self, fn, *args, **kwargs):
+        """
+        Voer een READ-call uit (fn(*args) die self.w3 gebruikt); faalt hij op
+        de huidige relay, wissel dan naar de volgende relay en probeer opnieuw.
+        Bedoeld voor het opvragen van fees/prijs/balances (collect, slot0,
+        getPool, balanceOf) -- NIET voor transacties. Gooit de laatste fout
+        pas op als ALLE relays falen, zodat de bot zich normaal blijft
+        gedragen bij een echte storing.
+        """
+        laatste_fout = None
+        for poging in range(len(self._relay_urls)):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                laatste_fout = e
+                self._relay_idx = (self._relay_idx + 1) % len(self._relay_urls)
+                nieuwe_url = self._relay_urls[self._relay_idx]
+                print(f"[rpc] read-call faalde op relay {poging} ({str(e)[:60]}) -- "
+                      f"wissel naar {nieuwe_url}")
+                self.w3 = self._maak_w3(nieuwe_url)
+        raise laatste_fout
 
     @property
     def address(self) -> str:
