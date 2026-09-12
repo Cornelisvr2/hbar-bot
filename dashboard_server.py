@@ -41,7 +41,7 @@ RANGE_STATUS_LABELS = {
 USD_NAAR_EUR = 0.923
 
 
-async def _build_dashboard_context() -> dict:
+async def _build_dashboard_context_live() -> dict:
     """Verzamelt alle data die het dashboard-sjabloon nodig heeft."""
     db = PostgresClient()
     await db.connect()
@@ -270,6 +270,37 @@ async def _build_chart_data(db: PostgresClient, days: int) -> dict:
         "labels": [r["recorded_at"].strftime(formaat) for r in rijen],
         "values": [r["total_value_usd"] for r in rijen],
     }
+
+
+# FASE 1 lees-architectuur (12 sep 2026): het dashboard leest de laatste
+# snapshot uit dashboard_snapshots (door snapshot_writer.py weggeschreven) i.p.v.
+# zelf live GeckoTerminal/Mirror Node te bevragen -> instant laden. Valt terug
+# op de live-berekening als er geen (verse) snapshot is, zodat het altijd werkt.
+SNAPSHOT_MAX_AGE_SECONDS = 15 * 60
+
+async def _build_dashboard_context() -> dict:
+    import json as _json
+    from postgres_client import PostgresClient
+    db = PostgresClient()
+    try:
+        await db.connect()
+        async with db._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT payload, extract(epoch from (now() - ts)) AS leeftijd "
+                "FROM dashboard_snapshots ORDER BY ts DESC LIMIT 1")
+        if row and row["leeftijd"] is not None and row["leeftijd"] <= SNAPSHOT_MAX_AGE_SECONDS:
+            ctx = row["payload"] if isinstance(row["payload"], dict) else _json.loads(row["payload"])
+            ctx["_snapshot_leeftijd_s"] = int(row["leeftijd"])
+            return ctx
+    except Exception as e:
+        print(f"[dashboard] snapshot lezen mislukt ({e}) -- val terug op live")
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
+    # terugval: live berekenen (traag, maar altijd correct)
+    return await _build_dashboard_context_live()
 
 
 @app.get("/", response_class=HTMLResponse)
