@@ -35,7 +35,7 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 UA = {"User-Agent": "hbar-bot-macro-loader/1.0"}
-FRED_SERIES = ["DTWEXBGS", "DGS10", "DGS2", "DFII10", "DFF", "VIXCLS", "SP500"]
+FRED_SERIES = ["DTWEXBGS", "DGS10", "DGS2", "DFII10", "DFF", "VIXCLS", "SP500", "NASDAQCOM"]
 FUT_SYMBOLS = ["BTCUSDT", "HBARUSDT"]
 
 
