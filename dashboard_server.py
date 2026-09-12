@@ -272,6 +272,25 @@ async def _build_chart_data(db: PostgresClient, days: int) -> dict:
     }
 
 
+from fastapi import Request
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Ontvangt Telegram callback_query's (knop-taps). Checkt de secret-header
+    zodat alleen Telegram zelf hier binnenkomt. Fundament voor login-goedkeuring
+    en de bedieningsknoppen met 2-factor."""
+    import os as _os
+    from telegram_webhook import verwerk_callback
+    verwacht = _os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
+    gekregen = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if verwacht and gekregen != verwacht:
+        return JSONResponse({"ok": False, "reden": "ongeldige secret"}, status_code=403)
+    update = await request.json()
+    resultaat = verwerk_callback(update)
+    print(f"[telegram-webhook] {resultaat}")
+    return JSONResponse({"ok": True})
+
+
 # FASE 1 lees-architectuur (12 sep 2026): het dashboard leest de laatste
 # snapshot uit dashboard_snapshots (door snapshot_writer.py weggeschreven) i.p.v.
 # zelf live GeckoTerminal/Mirror Node te bevragen -> instant laden. Valt terug
