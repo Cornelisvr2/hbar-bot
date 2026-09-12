@@ -37,6 +37,9 @@ from rss_news_client import normalize_headline
 
 MACRO_MIN_MAGNITUDE = int(os.environ.get("MACRO_MIN_MAGNITUDE", "3"))   # alleen marktrelevant algemeen nieuws bewaren
 MACRO_MAX_PER_REFRESH = int(os.environ.get("MACRO_MAX_PER_REFRESH", "25"))  # kostenrem op LLM-calls per verversing
+# (11 sep 2026) Macro/nieuws-laag AAN/UIT. Standaard UIT: stuurt niets en de
+# LLM-classificatie kostte credits voor niets. Weer aan: MACRO_ENABLED=true.
+MACRO_ENABLED = os.environ.get("MACRO_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 
 SENTIMENT_BIAS_BY_ASSET = {
     "BTC": float(os.environ.get("SENTIMENT_BIAS_BTC", "0.17")),
@@ -1941,6 +1944,8 @@ class RegimeOrchestrator:
             print(f"[nieuws] MACRO: {gezien_n} nieuwe koppen beoordeeld, {bewaard} relevant bewaard.")
 
     async def _refresh_sentiment_if_due(self):
+        if not MACRO_ENABLED:
+            return
         if (time.time() - self._last_sentiment_refresh) < SENTIMENT_REFRESH_SECONDS:
             return
 
