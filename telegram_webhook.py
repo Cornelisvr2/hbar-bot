@@ -1,35 +1,14 @@
 """
 telegram_webhook.py -- tweerichtings-Telegram (fase 1b / fundament fase 4).
 
-De bestaande telegram_notify.py kan alleen berichten STUREN. Deze module voegt
-toe: berichten met knoppen (inline keyboard) sturen, en de knop-taps ONTVANGEN
-via een Telegram-webhook. Fundament voor: login-goedkeuring (nu) en de
-bedieningsknoppen met 2-factor (later).
+Pending-verzoeken leven in Postgres (telegram_pending_verzoeken, zie
+migratie_telegram_pending.sql), niet meer in een in-memory dict -- dat brak
+zodra een verzoek werd aangemaakt door een ander proces dan de draaiende
+dashboard-server (bv. `docker compose exec ... --test`).
 
-Beveiliging:
-- Webhook-URL: https://<domein>/telegram/webhook
-- Telegram stuurt een geheime header (X-Telegram-Bot-Api-Secret-Token) mee die
-  we vergelijken met TELEGRAM_WEBHOOK_SECRET -> niemand anders kan nep-callbacks
-  sturen.
-- Alleen callbacks van de bekende TELEGRAM_CHAT_ID worden geaccepteerd.
-
-Pending-verzoeken (login of actie) leven in Postgres (telegram_pending_verzoeken,
-zie migratie_telegram_pending.sql) met een verloop van PENDING_TTL seconden.
-
-BELANGRIJK (12 sep 2026, gefixt): dit stond eerder in een in-memory dict.
-Dat brak zodra een verzoek werd aangemaakt door een ANDER proces dan de
-draaiende dashboard-server (bv. `docker compose exec ... --test`, of
-toekomstige extra workers) -- elk proces had zijn eigen, lege staat, dus
-Telegram-callbacks vonden het verzoek nooit terug ("verzoek onbekend/
-verlopen" bij elke tap). Door de staat in Postgres te zetten ziet elk
-proces dezelfde, actuele staat.
-
-Eenmalig de webhook registreren bij Telegram:
     docker compose exec -T dashboard python3 telegram_webhook.py --register
-Status bekijken / verwijderen:
     docker compose exec -T dashboard python3 telegram_webhook.py --info
     docker compose exec -T dashboard python3 telegram_webhook.py --delete
-Testbericht met Ja/Nee-knop sturen:
     docker compose exec -T dashboard python3 telegram_webhook.py --test
 """
 import asyncio
@@ -44,7 +23,7 @@ from postgres_client import PostgresClient
 
 API = "https://api.telegram.org"
 DOMEIN = os.environ.get("DASHBOARD_DOMEIN", "187-124-8-211.sslip.io")
-PENDING_TTL = 120  # seconden dat een verzoek geldig is
+PENDING_TTL = 120
 
 
 def _token():
@@ -59,8 +38,7 @@ def _secret():
     return os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
 
-def stuur_met_knoppen(tekst: str, verzoek_id: str, ja_label="✅ Goedkeuren", nee_label="❌ Weigeren") -> bool:
-    """Stuur een bericht met twee inline-knoppen; callback_data = <ja|nee>:<verzoek_id>."""
+def stuur_met_knoppen(tekst: str, verzoek_id: str, ja_label="\u2705 Goedkeuren", nee_label="\u274c Weigeren") -> bool:
     url = f"{API}/bot{_token()}/sendMessage"
     payload = {
         "chat_id": _chat_id(),
@@ -77,43 +55,71 @@ def stuur_met_knoppen(tekst: str, verzoek_id: str, ja_label="✅ Goedkeuren", ne
 
 
 async def nieuw_verzoek(db: PostgresClient, soort: str, omschrijving: str) -> str:
-    """Maak een pending-verzoek in Postgres aan en stuur de Telegram-vraag. Retourneert het id."""
     vid = uuid.uuid4().hex[:12]
     await db.create_pending_verzoek(vid, soort, omschrijving)
-    stuur_met_knoppen(f"🔐 {omschrijving}\n\nWas jij dit? Bevestig binnen 2 minuten.", vid)
+    stuur_met_knoppen(f"\U0001f510 {omschrijving}\n\nWas jij dit? Bevestig binnen 2 minuten.", vid)
     return vid
 
 
+def _antwoord_callback(antwoord_id: str, tekst: str) -> None:
+    """Toont een korte, boven-in-beeld toast in Telegram (verdwijnt na een paar seconden)."""
+    requests.post(f"{API}/bot{_token()}/answerCallbackQuery",
+                  json={"callback_query_id": antwoord_id, "text": tekst, "show_alert": False}, timeout=10)
+
+
+def _bewerk_bericht(chat_id, message_id, tekst: str) -> None:
+    """Past het oorspronkelijke bericht aan (bv. '\u2705 Goedgekeurd') en verwijdert de knoppen,
+    zodat er een blijvend, zichtbaar bewijs in de chat staat -- niet alleen een toast."""
+    requests.post(f"{API}/bot{_token()}/editMessageText", json={
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": tekst,
+        "reply_markup": {"inline_keyboard": []},
+    }, timeout=10)
+
+
 async def verwerk_callback(db: PostgresClient, update: dict) -> dict:
-    """Verwerk een binnenkomende callback_query. Retourneert {ok, status, soort}."""
     cq = update.get("callback_query")
     if not cq:
         return {"ok": False, "reden": "geen callback_query"}
-    # alleen van ons eigen account
     from_id = str(cq.get("from", {}).get("id", ""))
     if _chat_id() and from_id != str(_chat_id()):
         return {"ok": False, "reden": "onbekende afzender"}
     data = cq.get("data", "")
     antwoord_id = cq.get("id")
+    msg = cq.get("message", {}) or {}
+    chat_id = msg.get("chat", {}).get("id")
+    message_id = msg.get("message_id")
+    oorspronkelijke_tekst = msg.get("text", "")
     try:
         keuze, vid = data.split(":", 1)
     except ValueError:
+        if antwoord_id:
+            _antwoord_callback(antwoord_id, "Ongeldig verzoek")
         return {"ok": False, "reden": "ongeldige data"}
     p = await db.get_pending_verzoek(vid)
-    # bevestig de tap naar Telegram (haalt het "laden"-cirkeltje weg)
-    if antwoord_id:
-        requests.post(f"{API}/bot{_token()}/answerCallbackQuery",
-                      json={"callback_query_id": antwoord_id}, timeout=10)
     if not p:
+        if antwoord_id:
+            _antwoord_callback(antwoord_id, "\u26a0\ufe0f Onbekend of verlopen")
         return {"ok": False, "reden": "verzoek onbekend/verlopen"}
     if time.time() - p["aangemaakt"].timestamp() > PENDING_TTL:
         await db.resolve_pending_verzoek(vid, "verlopen")
+        if antwoord_id:
+            _antwoord_callback(antwoord_id, "\u231b Verlopen")
+        if chat_id and message_id:
+            _bewerk_bericht(chat_id, message_id, f"{oorspronkelijke_tekst}\n\n\u231b Verlopen -- niet meer geldig.")
         return {"ok": False, "reden": "verlopen", "soort": p["soort"]}
     nieuwe_status = "goedgekeurd" if keuze == "ja" else "geweigerd"
     gelukt = await db.resolve_pending_verzoek(vid, nieuwe_status)
     if not gelukt:
-        # was inmiddels al niet meer 'open' (dubbele tap / race) -- geen tweede keer verwerken
+        if antwoord_id:
+            _antwoord_callback(antwoord_id, "Al verwerkt")
         return {"ok": False, "reden": "al verwerkt", "soort": p["soort"]}
+    if antwoord_id:
+        _antwoord_callback(antwoord_id, "\u2705 Verwerkt" if nieuwe_status == "goedgekeurd" else "\u274c Verwerkt")
+    if chat_id and message_id:
+        icoon = "\u2705 Goedgekeurd" if nieuwe_status == "goedgekeurd" else "\u274c Geweigerd"
+        _bewerk_bericht(chat_id, message_id, f"{oorspronkelijke_tekst}\n\n{icoon}")
     return {"ok": True, "status": nieuwe_status, "soort": p["soort"], "verzoek_id": vid}
 
 
@@ -126,7 +132,6 @@ async def verzoek_status(db: PostgresClient, vid: str) -> str:
     return p["status"]
 
 
-# ---- beheer (CLI) ----
 def _register():
     url = f"{API}/bot{_token()}/setWebhook"
     payload = {"url": f"https://{DOMEIN}/telegram/webhook", "secret_token": _secret(),

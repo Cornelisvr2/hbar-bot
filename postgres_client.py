@@ -40,6 +40,45 @@ class PostgresClient:
         if self._pool:
             await self._pool.close()
 
+    async def create_pending_verzoek(self, vid: str, soort: str, omschrijving: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO telegram_pending_verzoeken (id, soort, omschrijving, status)
+                VALUES ($1, $2, $3, 'open')
+                """,
+                vid, soort, omschrijving,
+            )
+
+    async def get_pending_verzoek(self, vid: str):
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, soort, omschrijving, status, aangemaakt
+                FROM telegram_pending_verzoeken WHERE id = $1
+                """,
+                vid,
+            )
+            return dict(row) if row else None
+
+    async def resolve_pending_verzoek(self, vid: str, status: str) -> bool:
+        """
+        Zet een 'open' verzoek op de gegeven status. Retourneert False als het
+        verzoek niet bestond of al niet meer 'open' was -- atomisch via
+        WHERE status='open', zodat een dubbele tap niet twee keer "slaagt".
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE telegram_pending_verzoeken
+                SET status = $2
+                WHERE id = $1 AND status = 'open'
+                RETURNING id
+                """,
+                vid, status,
+            )
+            return row is not None
+
     async def log_sentiment(self, asset: str, headline: str, sentiment_score: float,
                               confidence: float, is_idiosyncratic: bool,
                               rationale: str = "", source: str = "llm",

@@ -286,7 +286,12 @@ async def telegram_webhook(request: Request):
     if verwacht and gekregen != verwacht:
         return JSONResponse({"ok": False, "reden": "ongeldige secret"}, status_code=403)
     update = await request.json()
-    resultaat = verwerk_callback(update)
+    db = PostgresClient()
+    await db.connect()
+    try:
+        resultaat = await verwerk_callback(db, update)
+    finally:
+        await db.close()
     print(f"[telegram-webhook] {resultaat}")
     return JSONResponse({"ok": True})
 
