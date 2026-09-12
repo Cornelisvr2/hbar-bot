@@ -368,29 +368,29 @@
   </div>
 
   <div class="panel">
-    <div class="panel-title">Voorspelling — bij aanhoudende APR</div>
+    <div class="panel-title">Voorspelling — pool-opbrengst <span style="color: var(--text-muted); font-weight: normal;">(bij aanhoudende APR, koers buiten beschouwing)</span></div>
+    {% set stapel = (d.position.hbar if d.position else 0) + d.wallet.hbar %}
     <div class="projection-row">
       <div class="projection-item">
         <span class="p-period">30 dagen</span>
-        <span class="p-val">${{ "%.2f"|format(d.projection_30d) }}</span>
-        <span class="p-change up">+{{ "%.1f"|format((d.projection_30d/d.total_value_usd - 1)*100) }}%</span>
+        <span class="p-val">+{{ "%.0f"|format(stapel * ((1 + d.projection_apr_pct/100/365)**30 - 1)) }} HBAR</span>
+        <span class="p-change up" style="color: var(--text-muted);">waarde ${{ "%.0f"|format(d.projection_30d) }} (koers gelijk)</span>
       </div>
       <div class="projection-item">
         <span class="p-period">90 dagen</span>
-        <span class="p-val">${{ "%.2f"|format(d.projection_90d) }}</span>
-        <span class="p-change up">+{{ "%.1f"|format((d.projection_90d/d.total_value_usd - 1)*100) }}%</span>
+        <span class="p-val">+{{ "%.0f"|format(stapel * ((1 + d.projection_apr_pct/100/365)**90 - 1)) }} HBAR</span>
+        <span class="p-change up" style="color: var(--text-muted);">waarde ${{ "%.0f"|format(d.projection_90d) }} (koers gelijk)</span>
       </div>
       <div class="projection-item">
         <span class="p-period">180 dagen</span>
-        <span class="p-val">${{ "%.2f"|format(d.projection_180d) }}</span>
-        <span class="p-change up">+{{ "%.1f"|format((d.projection_180d/d.total_value_usd - 1)*100) }}%</span>
+        <span class="p-val">+{{ "%.0f"|format(stapel * ((1 + d.projection_apr_pct/100/365)**180 - 1)) }} HBAR</span>
+        <span class="p-change up" style="color: var(--text-muted);">waarde ${{ "%.0f"|format(d.projection_180d) }} (koers gelijk)</span>
       </div>
     </div>
     <div class="projection-note">
-      Uitgaande van de 7-daags gemiddelde Fees-APR plus LARI-schatting ({{ "%.1f"|format(d.projection_apr_pct) }}%), dagelijks samengesteld,
-      zonder verdere stortingen. Geen garantie — de APR schommelt in de
-      praktijk met het handelsvolume, en zegt niets over koersrisico
-      (impermanent loss) op de onderliggende HBAR/{{ d.quote_symbol }}-posities.
+      Muntjes-groei uit de 7-daags gemiddelde Fees-APR + LARI ({{ "%.1f"|format(d.projection_apr_pct) }}%), dagelijks samengesteld, zonder stortingen.
+      Puur de fee-opbrengst in HBAR — de koers en impermanent loss zitten hier NIET in
+      (dat komt in de scenario-calculator). Geen garantie; de APR schommelt met het handelsvolume.
     </div>
   </div>
 
