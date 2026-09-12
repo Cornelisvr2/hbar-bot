@@ -26,6 +26,64 @@ from lp_manager import compute_fees_apr
 from postgres_client import PostgresClient
 
 app = FastAPI()
+
+# ===== LOGIN / AUTH (fase 1b, 12 sep 2026) =====
+from fastapi import Request as _Req
+from fastapi.responses import HTMLResponse as _HTML, JSONResponse as _JSON, RedirectResponse as _Redir
+import dashboard_auth as _auth
+from telegram_webhook import nieuw_verzoek as _nieuw_verzoek, verzoek_status as _verzoek_status
+
+# routes die ZONDER login bereikbaar zijn
+_OPEN_PADEN = ("/login", "/login/start", "/login/status", "/telegram/webhook", "/gezond")
+
+@app.middleware("http")
+async def _login_muur(request: _Req, call_next):
+    pad = request.url.path
+    if any(pad == p or pad.startswith(p + "/") for p in _OPEN_PADEN) or pad.startswith("/static"):
+        return await call_next(request)
+    if _auth.cookie_geldig(request.cookies.get(_auth.COOKIE_NAAM)):
+        return await call_next(request)
+    # niet ingelogd -> naar de loginpagina (of 401 voor API-calls)
+    if pad.startswith("/api"):
+        return _JSON({"ok": False, "reden": "niet ingelogd"}, status_code=401)
+    return _Redir("/login", status_code=302)
+
+@app.get("/gezond")
+async def _gezond():
+    return _JSON({"ok": True})
+
+@app.get("/login", response_class=_HTML)
+async def _login_pagina():
+    return _auth.LOGIN_HTML
+
+@app.post("/login/start")
+async def _login_start(request: _Req):
+    body = await request.json()
+    if not _auth.username_klopt(body.get("username", "")):
+        return _JSON({"ok": False, "reden": "onbekende gebruikersnaam"}, status_code=403)
+    db = PostgresClient(); await db.connect()
+    try:
+        herkomst = request.client.host if request.client else "onbekend"
+        vid = await _nieuw_verzoek(db, "login", f"Inlogverzoek dashboard vanaf {herkomst}")
+    finally:
+        await db.close()
+    return _JSON({"ok": True, "vid": vid})
+
+@app.get("/login/status")
+async def _login_status(vid: str, response: _Req = None):
+    from fastapi.responses import JSONResponse
+    db = PostgresClient(); await db.connect()
+    try:
+        status = await _verzoek_status(db, vid)
+    finally:
+        await db.close()
+    resp = JSONResponse({"status": status})
+    if status == "goedgekeurd":
+        resp.set_cookie(_auth.COOKIE_NAAM, _auth.maak_sessie_cookie(),
+                        max_age=_auth.SESSIE_TTL, httponly=True, samesite="lax", secure=True)
+    return resp
+
+
 jinja_env = Environment(loader=FileSystemLoader("templates"))
 
 RANGE_STATUS_LABELS = {
