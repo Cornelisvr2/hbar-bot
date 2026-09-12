@@ -1,17 +1,9 @@
 """
-kosten_teller.py -- totale kosten van de bot, RECHTSTREEKS van de chain.
+kosten_teller.py -- totale kosten van de bot, rechtstreeks van de chain.
 
-Leest ALLE transacties van het bot-account uit de Hedera Mirror Node
-(dezelfde bron als HashScan) en telt de werkelijk betaalde fees op. Geen
-afhankelijkheid van de trades-tabel (die logt actual_amount_out niet).
-
-  - charged_tx_fee per transactie (tinybar -> HBAR): het EXACTE netwerk/gas-
-    bedrag dat het account heeft betaald, voor elke tx die het account als
-    payer had.
-Telt ook hoeveel transacties er waren en splitst naar type (crypto/contract).
-
-Het account-ID wordt afgeleid uit de sleutel (publiek adres -> Mirror Node),
-of via --account 0.0.xxxxx.
+Leest alle transacties van het bot-account uit de Hedera Mirror Node
+(zelfde bron als HashScan) en telt de betaalde netwerk-fee (charged_tx_fee)
+op. Ontdubbelt op transaction_id, want de paginering kan overlappen.
 
     docker compose run --rm -T hbar-bot python3 kosten_teller.py
     docker compose run --rm -T hbar-bot python3 kosten_teller.py --account 0.0.10819646 --json
@@ -43,53 +35,50 @@ def main():
     if not acc:
         print("Kon account-ID niet bepalen."); return
 
-    totaal_fee_tinybar = 0
+    totaal = 0
     per_type = {}
     n = 0
+    gezien = set()
     url = f"{mirror}/api/v1/transactions?account.id={acc}&limit=100&order=asc"
     pagina = 0
-    while url and pagina < 200:   # ruime bovengrens
+    while url and pagina < 100:
         r = requests.get(url, headers=UA, timeout=20)
         if r.status_code != 200:
             break
         d = r.json()
         for tx in d.get("transactions", []):
-            # De fee die DIT account betaalde = de negatieve transfer op ons
-            # account (de payer kan een relay-node zijn, dus filteren op
-            # transaction_id klopt niet). We tellen alle uitgaande HBAR die
-            # als fee/betaling van ons account afging bij een SUCCESS-tx.
-            if tx.get("result") != "SUCCESS":
+            tid = tx.get("transaction_id")
+            if tx.get("result") != "SUCCESS" or tid in gezien:
                 continue
-            ons = sum(-tr["amount"] for tr in tx.get("transfers", [])
-                      if tr.get("account") == acc and tr["amount"] < 0)
-            if ons > 0:
-                totaal_fee_tinybar += ons
-                t = tx.get("name", "onbekend")
-                per_type[t] = per_type.get(t, 0) + ons
-                n += 1
+            gezien.add(tid)
+            fee = tx.get("charged_tx_fee") or 0
+            if fee <= 0:
+                continue
+            totaal += fee
+            t = tx.get("name", "onbekend")
+            per_type[t] = per_type.get(t, 0) + fee
+            n += 1
         nxt = (d.get("links") or {}).get("next")
         url = f"{mirror}{nxt}" if nxt else None
         pagina += 1
 
-    totaal_hbar = totaal_fee_tinybar / 1e8
+    hbar = totaal / 1e8
     resultaat = {
         "account": acc,
-        "aantal_betaalde_tx": n,
-        "totaal_gas_hbar": round(totaal_hbar, 4),
-        "per_type_hbar": {k: round(v / 1e8, 4) for k, v in sorted(per_type.items(), key=lambda x: -x[1])},
+        "aantal_tx": n,
+        "gas_hbar": round(hbar, 2),
+        "per_type_hbar": {k: round(v / 1e8, 2) for k, v in sorted(per_type.items(), key=lambda x: -x[1])},
     }
     if json_uit:
         print(json.dumps(resultaat))
     else:
         print(f"\nKosten van account {acc} (rechtstreeks van de chain)")
-        print(f"  Transacties met fee: {n}")
-        print(f"  Totaal gas/netwerk:  {totaal_hbar:.4f} HBAR")
-        print(f"  Per type:")
+        print(f"  Transacties:        {n}")
+        print(f"  Totaal gas betaald: {hbar:.2f} HBAR")
         for k, v in resultaat["per_type_hbar"].items():
-            print(f"    {k:28s} {v:.4f} HBAR")
-        print("\nNB: dit is de NETWERK-fee (gas), exact van de chain. De pool-swap-fee")
-        print("(0,3% per swap) zit verrekend in de swap-bedragen zelf, niet als aparte")
-        print("chain-fee -- die schatten we apart uit het aantal swaps x 0,3%.")
+            print(f"    {k:24s} {v:.2f} HBAR")
+        print("\nNB: dit is de netwerk-fee (gas). De pool-swap-fee (0,3% per swap) zit")
+        print("verrekend in de swap-bedragen zelf en wordt apart geschat.")
 
 
 if __name__ == "__main__":
