@@ -429,7 +429,17 @@
       <div class="stat-line"><span class="label">Totaal-APR (fees + LARI)</span><span class="val status-ok">{{ "%.1f"|format(d.total_apr_pct) }}%</span></div>
       {% endif %}
       {% if d.lari_realized_count is not none %}
-      <div class="stat-line"><span class="label">LARI ontvangen</span><span class="val">{{ "%.2f"|format(d.lari_realized_sauce) }} SAUCE + {{ "%.2f"|format(d.lari_realized_hbar) }} HBAR <span style="color: var(--text-muted);">({{ d.lari_realized_count }} airdrops)</span></span></div>
+      <div style="margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);">
+        <div class="panel-title" style="margin-bottom: 10px;">🎁 Rewards (LARI-airdrop per epoch)</div>
+        <div class="stat-line"><span class="label">Ontvangen SAUCE</span><span class="val">{{ "%.2f"|format(d.lari_realized_sauce) }} <span style="color: var(--text-muted);">({{ d.lari_realized_count }} airdrops)</span></span></div>
+        {% if d.lari_realized_hbar and d.lari_realized_hbar > 0 %}
+        <div class="stat-line"><span class="label">Ontvangen HBAR (herbelegd)</span><span class="val">{{ "%.2f"|format(d.lari_realized_hbar) }}</span></div>
+        {% endif %}
+        {% if d.lari_our_epoch_usd is not none %}
+        <div class="stat-line"><span class="label">Verwacht per epoch</span><span class="val status-ok">+${{ "%.2f"|format(d.lari_our_epoch_usd) }}</span></div>
+        {% endif %}
+        <div class="stat-line" style="border-bottom: none;"><span class="label" style="font-size: 12px;">Komt automatisch als los SAUCE in de wallet — telt mee zodra binnen.</span><span></span></div>
+      </div>
       {% endif %}
     </div>
 
