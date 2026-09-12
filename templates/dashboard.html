@@ -461,37 +461,6 @@
     </div>
   </div>
 
-  <div class="panel">
-    <div class="panel-title-row">
-      <div class="panel-title">Transactiegeschiedenis</div>
-      <button class="toggle-btn" id="ledgerToggle" onclick="ledgerInklappen()">Toon details</button>
-    </div>
-
-    <div id="ledgerDetails" style="display: none;">
-      {% if d.transactions %}
-      {% for t in d.transactions %}
-      <div class="ledger-row">
-        <span class="ledger-date">{{ t.date_label }}</span>
-        <span class="ledger-type">{{ t.description }}<span class="tag">{{ t.tag }}</span></span>
-        {% if t.is_cost %}
-        <span class="ledger-amount cost">−{{ "%.4f"|format(t.amount) }} HBAR</span>
-        <span></span>
-        {% else %}
-        <span></span>
-        <span class="ledger-amount income">+{{ "%.4f"|format(t.amount) }} HBAR</span>
-        {% endif %}
-      </div>
-      {% endfor %}
-      {% else %}
-      <div class="ledger-row"><span class="ledger-type" style="color: var(--text-muted);">Nog geen transacties geregistreerd.</span></div>
-      {% endif %}
-    </div>
-
-    <div class="summary-strip" style="margin-top: 0; padding-top: 0; border-top: none;">
-      <div class="summary-item"><span class="label">Totale kosten (30d)</span><span class="val">{{ "%.4f"|format(d.total_costs_30d) }} HBAR</span></div>
-      <div class="summary-item"><span class="label">Totale fee-inkomsten (30d)</span><span class="val status-ok">{{ "%.4f"|format(d.total_income_30d) }} HBAR</span></div>
-    </div>
-  </div>
 
   <div class="panel">
     <div class="panel-title">Kosten &amp; rendement <span style="color: var(--text-muted); font-weight: normal;">(sinds start)</span></div>
@@ -537,7 +506,29 @@
   </div>
 
   <div class="panel">
-    <div class="panel-title">Live-log</div>
+    <div class="panel-title-row">
+      <div class="panel-title">Log &amp; transacties</div>
+      <button class="toggle-btn" id="ledgerToggle" onclick="ledgerInklappen()">Toon transacties</button>
+    </div>
+
+    <div id="ledgerDetails" style="display: none; margin-bottom: 18px;">
+      {% if d.transactions %}
+      {% for t in d.transactions %}
+      <div class="ledger-row">
+        <span class="ledger-date">{{ t.date_label }}</span>
+        <span class="ledger-type">{{ t.description }}<span class="tag">{{ t.tag }}</span></span>
+        {% if t.is_cost %}
+        <span class="ledger-amount cost">−{{ "%.4f"|format(t.amount) }} HBAR</span><span></span>
+        {% else %}
+        <span></span><span class="ledger-amount income">+{{ "%.4f"|format(t.amount) }} HBAR</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="ledger-row"><span class="ledger-type" style="color: var(--text-muted);">Nog geen transacties geregistreerd.</span></div>
+      {% endif %}
+    </div>
+
     <div class="log-toolbar">
       <button class="active" data-filter="">alles</button>
       <button data-filter="[regime]">regime</button>
