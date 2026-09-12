@@ -418,15 +418,20 @@
     </div>
 
     <div class="panel">
-      <div class="panel-title">Samenstelling</div>
-      <div class="stat-line"><span class="label">Wallet — HBAR</span><span class="val">{{ "%.4f"|format(d.wallet.hbar) }}</span></div>
-      <div class="stat-line"><span class="label">Wallet — {{ d.quote_symbol }}</span><span class="val">{{ "%.2f"|format(d.wallet.sauce) }}</span></div>
+      <div class="panel-title-row">
+        <div class="panel-title">Wallet (los saldo)</div>
+        <div class="val" style="font-family: var(--mono);">${{ "%.2f"|format(d.wallet.value_usd) }}</div>
+      </div>
+      <div class="stat-line"><span class="label">HBAR</span><span class="val">{{ "%.4f"|format(d.wallet.hbar) }} <span style="color: var(--text-muted);">(${{ "%.2f"|format(d.wallet.hbar * d.hbar_price_usd) }})</span></span></div>
+      <div class="stat-line"><span class="label">{{ d.quote_symbol }}</span><span class="val">{{ "%.2f"|format(d.wallet.sauce) }}</span></div>
       {% if d.network == "mainnet" %}
-      <div class="stat-line"><span class="label">Wallet — SAUCE (LARI)</span><span class="val">{{ "%.2f"|format(d.wallet.lari_sauce) }} <span style="color: var(--text-muted);">(${{ "%.2f"|format(d.wallet.lari_sauce_value_usd) }})</span></span></div>
+      <div class="stat-line"><span class="label">SAUCE <span style="color: var(--text-muted);">(LARI-airdrop)</span></span><span class="val" style="{{ 'color: var(--text-muted);' if d.wallet.lari_sauce == 0 else '' }}">{{ "%.2f"|format(d.wallet.lari_sauce) }} <span style="color: var(--text-muted);">(${{ "%.2f"|format(d.wallet.lari_sauce_value_usd) }})</span></span></div>
       {% endif %}
-      <div class="stat-line"><span class="label">Positie — HBAR</span><span class="val">{{ "%.4f"|format(d.position.hbar) if d.position else "—" }}</span></div>
-      <div class="stat-line"><span class="label">Positie — {{ d.quote_symbol }}</span><span class="val">{{ "%.2f"|format(d.position.sauce) if d.position else "—" }}</span></div>
-      <div class="stat-line"><span class="label">Opgebouwde fees</span><span class="val status-ok">${{ "%.2f"|format(d.position.fee_value_usd) if d.position else "0.00" }}</span></div>
+      {% if d.wallet.hbar > 100 %}
+      <div style="margin-top: 12px; padding: 9px 11px; background: var(--gain-dim); border-radius: 4px; font-size: 13px; color: var(--gain);">
+        {{ "%.0f"|format(d.wallet.hbar) }} HBAR los staat boven de bijstort-drempel (~100 HBAR) — de bot voegt dit bij de volgende cyclus toe aan de pool.
+      </div>
+      {% endif %}
     </div>
   </div>
 
