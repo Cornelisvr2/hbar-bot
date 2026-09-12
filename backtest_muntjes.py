@@ -37,7 +37,7 @@ def dagreeks(rows):
     return dagen, [per_dag[d] for d in dagen]
 
 
-def run(dagen, prijs, start, maand, fee, apr, modus, band=0.08, bevestiging=2):
+def run(dagen, prijs, start, maand, fee, apr, modus, band=0.08, bevestiging=2, ma_dagen=200):
     """Geeft eind-HBAR (muntjes) en totaal gestorte muntjes terug."""
     n = len(prijs)
     dag_apr = apr / 100 / 365
@@ -82,7 +82,7 @@ def run(dagen, prijs, start, maand, fee, apr, modus, band=0.08, bevestiging=2):
             pool_hbar = pool_hbar * il * (1 + dag_apr * 0.70)
 
         if modus == "poolhbar":
-            ma_lo = max(0, i - 200)
+            ma_lo = max(0, i - ma_dagen)
             ma = sum(prijs[ma_lo:i + 1]) / (i - ma_lo + 1)
             sig = "HBAR" if prijs[i] > ma * (1 + band) else "POOL"
             wachtrij.append(sig)
