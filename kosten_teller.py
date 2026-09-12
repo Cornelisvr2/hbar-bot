@@ -54,12 +54,18 @@ def main():
             break
         d = r.json()
         for tx in d.get("transactions", []):
-            # alleen tx's waar DIT account de fee betaalde (payer)
-            if tx.get("charged_tx_fee") and tx.get("transaction_id", "").startswith(acc):
-                fee = tx["charged_tx_fee"]
-                totaal_fee_tinybar += fee
+            # De fee die DIT account betaalde = de negatieve transfer op ons
+            # account (de payer kan een relay-node zijn, dus filteren op
+            # transaction_id klopt niet). We tellen alle uitgaande HBAR die
+            # als fee/betaling van ons account afging bij een SUCCESS-tx.
+            if tx.get("result") != "SUCCESS":
+                continue
+            ons = sum(-tr["amount"] for tr in tx.get("transfers", [])
+                      if tr.get("account") == acc and tr["amount"] < 0)
+            if ons > 0:
+                totaal_fee_tinybar += ons
                 t = tx.get("name", "onbekend")
-                per_type[t] = per_type.get(t, 0) + fee
+                per_type[t] = per_type.get(t, 0) + ons
                 n += 1
         nxt = (d.get("links") or {}).get("next")
         url = f"{mirror}{nxt}" if nxt else None
